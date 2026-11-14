@@ -784,6 +784,8 @@ pub struct App {
     /// 上一次看到的蓝牙设备，用来只在连接/断开时提示一次。
     pub(crate) bt_shown: Vec<crate::bt::Device>,
     bt_initialized: bool,
+    /// 建立基线前的候选设备 ID，用于要求连续两次扫描一致。
+    bt_baseline: Vec<String>,
     /// v0.5.5：邮件账号、最近邮件与设置表单。
     pub(crate) mail: MailState,
     /// 岛内详情与独立阅读窗口各保留一份排版缓存。
@@ -909,6 +911,7 @@ impl App {
             music_volume_open: false,
             bt_shown: Vec::new(),
             bt_initialized: false,
+            bt_baseline: Vec::new(),
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             mail_lines_cache: Vec::new(),
             calendar: CalendarState::load(),
@@ -1386,16 +1389,23 @@ impl App {
         }
         if !self.settings.bluetooth_notifications {
             self.bt_shown.clear();
+            self.bt_baseline.clear();
             self.bt_initialized=false;
             self.alerts.retain(|a|a.source!=crate::extras::AlertSource::Internal || a.title!="蓝牙设备");
             if self.notice.as_ref().is_some_and(|a|a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备") {self.notice=None;}
             return;
         }
         if !env.bt_ready { return; }
-        // 只把首次完整扫描作为基线，之后的连接变化都应提示。
+        // 启动阶段蓝牙栈可能还没枚举完整，空列表不能作为基线；连续两次扫描一致才认为稳定。
         if !self.bt_initialized {
-            self.bt_initialized = true;
-            self.bt_shown = env.bt.clone();
+            if env.bt.is_empty() { return; }
+            let ids: Vec<String> = env.bt.iter().map(|d| d.id.clone()).collect();
+            if self.bt_baseline == ids {
+                self.bt_initialized = true;
+                self.bt_shown = env.bt.clone();
+            } else {
+                self.bt_baseline = ids;
+            }
             return;
         }
         let connected: Vec<_> = env.bt.iter().filter(|d| !self.bt_shown.iter().any(|old| old.id == d.id)).cloned().collect();

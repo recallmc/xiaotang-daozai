@@ -108,7 +108,9 @@ fn query(cache:&mut Cache) -> Result<Vec<Device>, ()> {
     ];
     let mut devices = Vec::new();
     for (classic, selector) in selectors {
-        let selector = windows::core::HSTRING::from(format!("({selector}) AND System.Devices.Aep.IsConnected:=System.StructuredQueryType.Boolean#True"));
+        // 只枚举已配对设备：附近电脑/手机的临时 BLE 连接也会处于“已连接”状态，
+        // 但它们不属于本机。配对状态用 AEP 属性过滤（DeviceInformationPairing 对经典蓝牙不可靠）。
+        let selector = windows::core::HSTRING::from(format!("({selector}) AND System.Devices.Aep.IsConnected:=System.StructuredQueryType.Boolean#True AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True"));
         let found = DeviceInformation::FindAllAsyncAqsFilter(&selector).map_err(|_| ())?.get().map_err(|_| ())?;
         for info in found {
             let Ok(id) = info.Id() else { continue };
