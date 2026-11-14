@@ -1,4 +1,4 @@
-//! 天气：按城市（留空时按网络出口定位）读取 Open-Meteo 的实况与七日预报。
+//! 天气：按城市（留空时优先用 Windows 系统定位，失败回退网络出口）读取 Open-Meteo 的实况与七日预报。
 //! 只保留最近一次结果用于离线展示，不读取、也不上传任何账号信息。
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -180,7 +180,7 @@ fn http_agent() -> ureq::Agent {
 }
 
 /// 按网络出口定位；国内常见出口能拿到中文城市名。
-pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
+fn locate_ip(agent: &ureq::Agent) -> Result<Position, String> {
     let url = url::Url::parse("https://ipwho.is/?lang=zh-CN").map_err(|_| "定位服务地址无效")?;
     let value = get(agent, &url)?;
     if !value["success"].as_bool().unwrap_or(false) { return Err("自动定位失败，请在设置里填写城市".into()); }
@@ -194,6 +194,97 @@ pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
     let position=Position { lat, lon, label, region };
     if !position.valid() {return Err("定位结果坐标无效".into());}
     Ok(position)
+}
+
+/// 用 Windows 定位服务取得真实坐标；权限不足或服务不可用时返回原因。
+#[cfg(windows)]
+fn system_position(agent: &ureq::Agent) -> Result<Position, String> {
+    use windows::Devices::Geolocation::{GeolocationAccessStatus, Geolocator};
+    use windows::Foundation::TimeSpan;
+    // 天气刷新在后台线程；激活 WinRT 前先初始化 COM 公寓。
+    let _ = unsafe {
+        windows::Win32::System::WinRT::RoInitialize(
+            windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
+        )
+    };
+    let locator = Geolocator::new().map_err(|error| format!("系统定位不可用：{error}"))?;
+    match Geolocator::RequestAccessAsync().and_then(|operation| operation.get()) {
+        Ok(status) if status == GeolocationAccessStatus::Allowed => {}
+        Ok(status) if status == GeolocationAccessStatus::Denied => {
+            return Err("系统定位未授权，请在 Windows 设置中允许桌面应用访问位置".into())
+        }
+        // Unspecified 或宿主不支持 RequestAccessAsync 时继续尝试直接取位置。
+        _ => {}
+    }
+    let maximum_age = TimeSpan { Duration: 60 * 10_000_000 };
+    let timeout = TimeSpan { Duration: 10 * 10_000_000 };
+    let geoposition = locator
+        .GetGeopositionAsyncWithAgeAndTimeout(maximum_age, timeout)
+        .map_err(|error| format!("系统定位失败：{error}"))?
+        .get()
+        .map_err(|error| format!("系统定位失败：{error}"))?;
+    let coordinate = geoposition
+        .Coordinate()
+        .map_err(|error| format!("系统定位失败：{error}"))?;
+    let point = coordinate
+        .Point()
+        .map_err(|error| format!("系统定位失败：{error}"))?;
+    let position = point
+        .Position()
+        .map_err(|error| format!("系统定位失败：{error}"))?;
+    let lat = position.Latitude;
+    let lon = position.Longitude;
+    let (label, region) = reverse_geocode(agent, lat, lon)
+        .unwrap_or_else(|| ("当前位置".into(), "系统定位".into()));
+    let position = Position { lat, lon, label, region };
+    if !position.valid() { return Err("系统定位坐标无效".into()); }
+    Ok(position)
+}
+
+/// 按坐标反查城市名；失败不影响天气，只影响地点显示。
+#[cfg(windows)]
+fn reverse_geocode(agent: &ureq::Agent, lat: f64, lon: f64) -> Option<(String, String)> {
+    let mut url = url::Url::parse("https://api.bigdatacloud.net/data/reverse-geocode-client").ok()?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("latitude", &format!("{lat:.6}"));
+        query.append_pair("longitude", &format!("{lon:.6}"));
+        query.append_pair("localityLanguage", "zh");
+    }
+    let value = get(agent, &url).ok()?;
+    let text = |key: &str| value[key].as_str().map(str::trim).filter(|text| !text.is_empty());
+    let label = text("city")
+        .or_else(|| text("locality"))
+        .or_else(|| text("principalSubdivision"))?
+        .to_string();
+    let region = [text("principalSubdivision"), text("countryName")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some((label, region))
+}
+
+/// 自动定位：优先使用 Windows 系统定位，失败时回退到网络出口。
+#[cfg(windows)]
+pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
+    match system_position(agent) {
+        Ok(position) => Ok(position),
+        Err(note) => {
+            let mut position = locate_ip(agent).map_err(|error| format!("{note}；{error}"))?;
+            position.region = if position.region.trim().is_empty() {
+                "网络定位".into()
+            } else {
+                format!("{} · 网络定位", position.region)
+            };
+            Ok(position)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
+    locate_ip(agent)
 }
 
 /// 中文行政区后缀：输入「广州市」时还要查「广州」，地理库里很多城市只收录了不带后缀的名字。
@@ -464,7 +555,7 @@ pub struct State {
     pub tap: Option<(f32, f32, f64)>,
     /// 连续失败次数：自动刷新按 2、4、8、16、30 分钟退避，成功后清零。
     pub failures: u32,
-    /// 自动定位结果与取得时间；3 小时内复用，不必每次刷新都查网络出口。
+    /// 自动定位结果与取得时间；3 小时内复用，不必每次刷新都查系统定位。
     located: Option<(Position, i64)>,
     /// 上一次请求使用的城市。
     last_city: Option<String>,
@@ -491,10 +582,8 @@ impl State {
         });
         state.cached.truncate(CACHE_LIMIT);
         state.snapshot=state.cached_for(city,state.active_position.as_ref()).cloned();
-        // 自动定位模式下，缓存里的坐标也可复用，启动时省一次出口定位。
-        if city.trim().is_empty() {
-            state.located=state.snapshot.as_ref().and_then(|s|s.position.clone().map(|p|(p,s.at)));
-        }
+        // 自动定位不使用上次的坐标：启动后按系统定位重新确认位置，
+        // 旧缓存只用于先把天气显示出来。
         state.cache=Some(path);
         state
     }
@@ -543,7 +632,7 @@ impl State {
         if self.failures==0 {0.0} else {(120.0*2f64.powi(self.failures.min(5) as i32-1)).min(1800.0)}
     }
 
-    /// 改为自动定位时调用：下次刷新重新识别网络出口。
+    /// 改为自动定位时调用：下次刷新重新获取系统定位。
     pub fn forget_location(&mut self) {self.located=None;}
 
     /// 设置里的城市是否和上次请求不一致（首次启动也算）。

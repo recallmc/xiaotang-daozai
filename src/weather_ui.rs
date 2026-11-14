@@ -660,6 +660,8 @@ impl App {
     /// 切换当前城市；`None` 为自动定位。立即换上缓存并保存设置，是否联网由刷新调度决定。
     pub(crate) fn switch_weather_city(&mut self, position: Option<weather::Position>) {
         if !self.module_on(WEATHER_PAGE) {return;}
+        // 切回自动定位时丢弃旧的定位结果，下一次刷新重新走系统定位。
+        if position.is_none() {self.weather.forget_location();}
         let city=position.as_ref().map(|p|p.label.clone()).unwrap_or_default();
         if self.settings.weather_city==city && self.settings.weather_position==position {self.weather.picker_open=false;return;}
         self.settings.weather_city=city.clone();
@@ -768,7 +770,7 @@ impl App {
         // 背景层：点面板外任何地方都收起。
         if c.live && self.weather.picker_open && c.hit(0.0,0.0,419.0,WEATHER_H,"weather-picker-backdrop").clicked() {pick=Some(Pick::Close);}
         let mut rows:Vec<(Option<weather::Position>,String,String)>=vec![(None,"自动定位".into(),
-            self.weather.cached_for("",None).map(|s|s.place.clone()).unwrap_or_else(||"按网络出口".into()))];
+            self.weather.cached_for("",None).map(|s|s.place.clone()).unwrap_or_else(||"系统定位".into()))];
         for p in &self.settings.weather_saved {rows.push((Some(p.clone()),p.label.clone(),p.region.split(" · ").next().unwrap_or_default().to_string()));}
         let row=27.0;
         let h=rows.len() as f32*row+row+10.0;
@@ -917,7 +919,7 @@ impl App {
 
         let Some(snapshot) = self.weather.snapshot.clone() else {
             let (title, detail) = if loading {
-                ("正在获取当地天气…", "首次定位需要几秒钟".to_string())
+                ("正在获取当地天气…", "首次定位会使用 Windows 定位服务，需要几秒钟".to_string())
             } else if let Some(error) = &self.weather.error {
                 ("天气暂时取不到", error.clone())
             } else {
@@ -1075,7 +1077,7 @@ impl App {
                 let city=position.as_ref().map(|p|p.label.as_str()).unwrap_or("");
                 let cached=self.weather.cached_for(city,position.as_ref()).cloned();
                 let (title,detail)=match &position {
-                    None=>("自动定位".to_string(),cached.as_ref().map(|s|format!("按网络出口识别 · 当前为 {}",s.place)).unwrap_or_else(||"按网络出口识别所在城市；使用代理时可能是代理所在地".into())),
+                    None=>("自动定位".to_string(),cached.as_ref().map(|s|format!("系统定位优先 · 当前为 {}",s.place)).unwrap_or_else(||"使用 Windows 定位服务；需在系统设置中允许桌面应用访问位置，失败时回退到网络定位".into())),
                     Some(p)=>(p.label.clone(),p.region.clone()),
                 };
                 let (click,remove)=city_row(ui,position==current,position.is_some(),&title,&detail,cached.as_ref(),accent);
@@ -1086,6 +1088,7 @@ impl App {
             else if let Some(position)=chosen {self.switch_weather_city(position);}
             ui.add_space(4.0);
             settings_hint(ui,&format!("最多保存 {} 个城市。点上方列表或岛上天气页的地点就能切换；只有当前城市会在后台定时更新。",weather::MAX_CITIES));
+            settings_hint(ui,"自动定位会读取 Windows 位置服务，坐标仅用于查询天气和地点名称。");
         });
 
         settings_label(ui,"添加城市");
