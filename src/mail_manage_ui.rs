@@ -10,6 +10,10 @@ fn identity(account:&Account)->String{
 #[derive(Default)]pub(crate) struct State{
     pub unread_only:bool,pub trash_open:bool,pub trash:Vec<Item>,
     pub data:HashMap<(String,Folder),Snapshot>,pub identities:HashMap<String,Account>,pub pending:HashSet<String>,
+    /// 队列里第一个请求的入队时间，用于超时自恢复。
+    pending_since:Option<f64>,
+    /// 请求失败或超时的账号，在冷却结束前不再自动重试。
+    failed:HashMap<String,f64>,
     pub next_refresh:f64,pub message:String,pub errors:Vec<String>,
     pub auto_read:Option<(String,u32)>,pub reader_trash:bool,
     reader_identity:Option<(Account,u32)>,
@@ -20,7 +24,7 @@ impl State{
     pub fn seen(&self,item:&Item,folder:Folder)->Option<bool>{
         self.data.get(&(item.account.to_ascii_lowercase(),folder))?.entries.iter().find(|(uid,_)|*uid==item.uid).map(|(_,seen)|*seen)
     }
-    pub fn ready(&self,account:&str,folder:Folder)->bool{self.pending.is_empty()&&self.data.contains_key(&(account.to_ascii_lowercase(),folder))}
+    pub fn ready(&self,account:&str,folder:Folder)->bool{!self.pending.contains(&account.to_ascii_lowercase())&&self.data.contains_key(&(account.to_ascii_lowercase(),folder))}
 }
 impl App{
     fn mail_physical_folder(&self,folder:Folder)->Folder{if !self.settings.mail_sync_operations{Folder::Inbox}else{folder}}
@@ -57,6 +61,7 @@ impl App{
     }
     pub(crate) fn mail_manage_mode_changed(&mut self){
         self.mail.manage.trash.clear();self.mail.manage.trash_open=false;self.mail.manage.auto_read=None;
+        self.mail.manage.pending.clear();self.mail.manage.pending_since=None;
         self.mail.open_uid=None;self.mail.reading=None;self.mail.manage.reader_identity=None;self.mail.manage.message.clear();self.mail.manage.next_refresh=0.0;
     }
     fn save_local_mail(&self)->Result<(),String>{
@@ -88,11 +93,12 @@ impl App{
     }
     pub(crate) fn mail_rows(&self)->&[Item]{if self.mail.manage.trash_open{&self.mail.manage.trash}else{&self.mail.recent}}
     pub(crate) fn mail_manage_request(&mut self,account:Option<&str>,folder:Folder,action:Action){
-        if !self.mail.manage.pending.is_empty(){return;}
         if action!=Action::Load&&!self.settings.mail_sync_operations{self.mail_local_action(account,folder,action);return;}
         let folder=self.mail_physical_folder(folder);
         let mut accounts:Vec<Account>=self.mail.accounts.iter().filter(|a|a.enabled&&account.is_none_or(|email|a.email.eq_ignore_ascii_case(email))).cloned().collect();
         if action==Action::ReadAll{accounts.retain(|a|self.mail.manage.data.contains_key(&(crate::mail::key(a),folder))&&self.mail.manage.identities.get(&crate::mail::key(a))==Some(a));}
+        // 按账号放行：某个账号正在同步或刚失败，不影响其他账号的整理。
+        accounts.retain(|a|{let key=crate::mail::key(a);!self.mail.manage.pending.contains(&key)&&self.mail.manage.failed.get(&key).is_none_or(|until|*until<=self.t)});
         if accounts.is_empty(){return;}
         if action!=Action::Load && accounts.iter().any(|a|!self.mail.manage.data.contains_key(&(crate::mail::key(a),folder))||self.mail.manage.identities.get(&crate::mail::key(a))!=Some(a)){
             self.mail.manage.message="请等待邮件状态同步完成".into();return;
@@ -109,6 +115,7 @@ impl App{
                 extra=self.mail.manage.local.iter().filter(|(_,f)|f.removed).filter_map(|(k,_)|{let(v,uid)=k.strip_prefix(&prefix)?.split_once(':')?;Some((v.parse().ok()?,uid.parse().ok()?))}).collect();
                 extra.sort_unstable_by(|a,b|b.1.cmp(&a.1));extra.truncate(60);
             }
+            if self.mail.manage.pending_since.is_none(){self.mail.manage.pending_since=Some(self.t);}
             self.mail.manage.pending.insert(email);
             self.pending.push(Cmd::MailManage(Request{account,folder,validity,known,extra,action:action.clone()}));
         }
@@ -125,7 +132,16 @@ impl App{
             if !cfg!(test){self.mail_reload_local();}
             self.mail.manage.local_loaded=true;
         }
-        if !self.mail.manage.pending.is_empty(){return;}
+        if !self.mail.manage.pending.is_empty(){
+            let since=*self.mail.manage.pending_since.get_or_insert(self.t);
+            if self.t-since>=90.0{
+                // 连接卡死或线程异常：跳过卡住的账号，让其他账号和按钮恢复可用。
+                let stuck:Vec<String>=self.mail.manage.pending.drain().collect();
+                for email in stuck{self.mail.manage.failed.insert(email,self.t+300.0);}
+                self.mail.manage.pending_since=None;
+                self.mail.manage.message="邮件同步超时，已跳过卡住的账号，请重试".into();
+            }
+        }
         if let Some((email,uid))=self.mail.manage.auto_read.take(){
             let folder=self.mail.manage.folder();
             let item=self.mail_rows().iter().find(|m|m.uid==uid&&m.account.eq_ignore_ascii_case(&email));
@@ -141,11 +157,14 @@ impl App{
     pub(crate) fn mail_managed(&mut self,done:Completed){
         let request=done.request;let email=crate::mail::key(&request.account);
         self.mail.manage.pending.remove(&email);
+        if self.mail.manage.pending.is_empty(){self.mail.manage.pending_since=None;}
         if !self.mail.accounts.iter().any(|a|a==&request.account){return;}
         let snapshot=match done.result{Ok(s)=>s,Err(error)=>{
+            self.mail.manage.failed.insert(email.clone(),self.t+300.0);
             self.mail.manage.errors.push(format!("{}：{error}",request.account.email));
             self.mail.manage.message=self.mail.manage.errors.join("；");return;
         }};
+        self.mail.manage.failed.remove(&email);
         let changed=self.mail.manage.data.get(&(email.clone(),request.folder)).is_some_and(|s|s.validity!=snapshot.validity);
         let mut snapshot=snapshot;
         let rows=if request.folder==Folder::Inbox{&mut self.mail.recent}else{&mut self.mail.manage.trash};

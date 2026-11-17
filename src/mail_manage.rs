@@ -166,5 +166,13 @@ mod protocol{
 }
 #[cfg(windows)]pub fn start()->(std::sync::mpsc::Sender<Request>,std::sync::mpsc::Receiver<Completed>){
     let(tx,rx)=std::sync::mpsc::channel::<Request>();let(done,out)=std::sync::mpsc::channel();
-    std::thread::spawn(move||while let Ok(request)=rx.recv(){let result=protocol::run(&request);let _=done.send(Completed{request,result});});(tx,out)
+    // 每个请求独立线程：某个账号的连接卡住或解析 panic 时，不会拖死其他账号的整理。
+    std::thread::spawn(move||while let Ok(request)=rx.recv(){
+        let done=done.clone();
+        let _=std::thread::Builder::new().name("daozai-mail-manage".into()).spawn(move||{
+            let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||protocol::run(&request)))
+                .unwrap_or_else(|_|Err("邮件操作异常，请重试".into()));
+            let _=done.send(Completed{request,result});
+        });
+    });(tx,out)
 }

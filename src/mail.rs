@@ -709,13 +709,26 @@ pub(crate) mod net {
         }
     }
 
+    /// 逐个地址带超时连接，避免某个不可达地址把整次请求拖到分钟级。
+    fn connect_tcp(host:&str,port:u16)->std::io::Result<TcpStream>{
+        use std::net::ToSocketAddrs;
+        let mut last=None;
+        for address in (host,port).to_socket_addrs()?{
+            match TcpStream::connect_timeout(&address,Duration::from_secs(6)){
+                Ok(stream)=>return Ok(stream),
+                Err(error)=>last=Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(||std::io::Error::new(std::io::ErrorKind::AddrNotAvailable,"没有可用地址")))
+    }
+
     pub fn connect(account: &Account, password: &str) -> Result<imap::Session<Prefixed<Stream>>, String> {
         let (host,port,username)=account.endpoint()?;
         let tls = TlsConnector::builder()
             .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
             .build()
             .map_err(|e| format!("TLS 初始化失败：{e}"))?;
-        let tcp = TcpStream::connect((host.as_str(), port))
+        let tcp = connect_tcp(&host, port)
             .map_err(|e| format!("无法连接 {host}：{e}"))?;
         let timeout = Some(Duration::from_secs(20));
         let _ = tcp.set_read_timeout(timeout);
