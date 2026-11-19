@@ -26,6 +26,10 @@ pub(crate) struct Item {
     pub download: u64,
     pub total: u64,
     pub expire: u64,
+    #[serde(default)]
+    pub reset: u64,
+    #[serde(default)]
+    pub reset_day: u8,
     pub updated: u64,
     pub error: String,
 }
@@ -62,6 +66,7 @@ pub(crate) struct State {
     active: Option<Active>,
     failed: bool,
     succeeded: bool,
+    batch_error: String,
     next_auto: f64,
 }
 
@@ -74,13 +79,15 @@ struct Fetched {
     download: u64,
     total: u64,
     expire: u64,
+    reset: u64,
+    reset_day: u8,
 }
 
 impl State {
     pub(crate) fn load() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         if cfg!(test) {
-            return Self { items: Vec::new(), selected: String::new(), names: HashMap::new(), hidden: HashSet::new(), expanded: HashSet::new(), link: String::new(), script: String::new(), note: String::new(), pending: HashSet::new(), tx, rx, path: None, loading: false, active: None, failed: false, succeeded: false, next_auto: 0.0 };
+            return Self { items: Vec::new(), selected: String::new(), names: HashMap::new(), hidden: HashSet::new(), expanded: HashSet::new(), link: String::new(), script: String::new(), note: String::new(), pending: HashSet::new(), tx, rx, path: None, loading: false, active: None, failed: false, succeeded: false, batch_error: String::new(), next_auto: 0.0 };
         }
         let path = crate::model::config_dir().join("subscriptions.json");
         let saved: Saved = std::fs::read(&path).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default();
@@ -101,6 +108,7 @@ impl State {
             active: None,
             failed: false,
             succeeded: false,
+            batch_error: String::new(),
             next_auto: 0.0,
         };
         for item in &mut state.items {
@@ -118,8 +126,10 @@ impl State {
     }
 
     fn prefer_link_selected(&mut self) {
-        if self.items.iter().find(|item| item.id == self.selected).is_some_and(|item| item.is_verge()) {
-            if let Some(link) = self.items.iter().find(|item| item.kind == "link") {
+        // 仅当当前 Clash 快照与某条导入链接同源时，切到导入链接；不同订阅保留各自选中项。
+        let selected = self.items.iter().find(|item| item.id == self.selected).cloned();
+        if let Some(verge) = selected.filter(|item| item.is_verge()) {
+            if let Some(link) = self.items.iter().find(|item| item.kind == "link" && !verge.source.is_empty() && item.source.eq_ignore_ascii_case(&verge.source)) {
                 self.selected = link.id.clone();
             }
         }
@@ -173,32 +183,40 @@ impl State {
                 match result {
                     Ok(fetched) => {
                         if let Some(name) = fetched.name.filter(|name| !name.trim().is_empty()) {
-                            if !self.names.contains_key(&id) { item.name = name; }
+                            // Clash 快照沿用原名称；导入链接首次获取时采用订阅商名称。
+                            if !item.is_verge() && !self.names.contains_key(&id) { item.name = name; }
                         }
                         item.upload = fetched.upload;
                         item.download = fetched.download;
                         item.total = fetched.total;
                         item.expire = fetched.expire;
+                        item.reset = fetched.reset;
+                        item.reset_day = fetched.reset_day;
                         item.updated = now();
                         item.error.clear();
                         self.succeeded = true;
                     }
-                    Err(error) => { item.error = error; self.failed = true; }
+                    Err(error) => {
+                        if self.batch_error.is_empty() { self.batch_error = error.clone(); }
+                        item.error = error;
+                        self.failed = true;
+                    }
                 }
             }
         }
         self.loading = !self.pending.is_empty();
         if !self.loading {
             if let Some(active) = self.active.take() {
+                let detail = if self.batch_error.trim().is_empty() { "请检查网络或订阅链接".to_owned() } else { self.batch_error.clone() };
                 self.note = match active {
-                    Active::Refresh if self.failed && !self.succeeded => "刷新失败，请检查网络或订阅链接".into(),
-                    Active::Refresh if self.failed => "部分订阅刷新失败，请检查网络或链接".into(),
-                    Active::Refresh => "流量已刷新".into(),
-                    Active::Auto if self.failed => "自动刷新失败，将在下次重试".into(),
-                    Active::Auto => "流量已自动刷新".into(),
-                    Active::Fetch if self.failed && !self.succeeded => "订阅信息获取失败，请检查链接或网络".into(),
-                    Active::Fetch if self.failed => "部分订阅信息获取失败".into(),
-                    Active::Fetch => "订阅信息已更新".into(),
+                    Active::Refresh if self.failed && !self.succeeded => format!("订阅商刷新失败：{detail}"),
+                    Active::Refresh if self.failed => format!("部分订阅刷新失败：{detail}"),
+                    Active::Refresh => "已从订阅商更新流量".into(),
+                    Active::Auto if self.failed => format!("自动刷新失败：{detail}"),
+                    Active::Auto => "已自动从订阅商更新流量".into(),
+                    Active::Fetch if self.failed && !self.succeeded => format!("订阅信息获取失败：{detail}"),
+                    Active::Fetch if self.failed => format!("部分订阅信息获取失败：{detail}"),
+                    Active::Fetch => "已从订阅商获取订阅信息".into(),
                 };
                 self.failed = false;
                 let succeeded = self.succeeded;
@@ -220,13 +238,14 @@ impl State {
         }
         let id = format!("link:{}", digest(&value));
         let source = host_of(&value).unwrap_or_else(|| "订阅链接".into());
-        self.items.push(Item { id: id.clone(), name: source.clone(), kind: "link".into(), url: value.clone(), source, upload: 0, download: 0, total: 0, expire: 0, updated: 0, error: "正在获取订阅信息…".into() });
+        self.items.push(Item { id: id.clone(), name: source.clone(), kind: "link".into(), url: value.clone(), source, upload: 0, download: 0, total: 0, expire: 0, reset: 0, reset_day: 0, updated: 0, error: "正在获取订阅信息…".into() });
         self.selected = id.clone();
         self.link.clear();
         self.note = "正在获取订阅信息…".into();
         self.active = Some(Active::Fetch);
         self.failed = false;
         self.succeeded = false;
+        self.batch_error.clear();
         self.save();
         self.fetch(id, value);
     }
@@ -245,7 +264,7 @@ impl State {
         }
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("脚本").to_owned();
         let id = format!("script:{}", digest(&value));
-        self.items.push(Item { id: id.clone(), name, kind: "script".into(), url: value.clone(), source: "本地脚本".into(), upload: 0, download: 0, total: 0, expire: 0, updated: now(), error: String::new() });
+        self.items.push(Item { id: id.clone(), name, kind: "script".into(), url: value.clone(), source: "本地脚本".into(), upload: 0, download: 0, total: 0, expire: 0, reset: 0, reset_day: 0, updated: now(), error: String::new() });
         self.selected = id;
         self.script.clear();
         self.note = "脚本已添加".into();
@@ -280,16 +299,43 @@ impl State {
     }
 
     fn refresh(&mut self, auto: bool) {
-        let targets: Vec<(String, String)> = self.items.iter().filter(|item| item.kind == "link").map(|item| (item.id.clone(), item.url.clone())).collect();
+        // 链接订阅和 Clash 快照都刷新；后者从 profiles.yaml 取订阅地址，不读它缓存的流量。
+        let verge_sources = verge_urls();
+        let mut targets: Vec<(String, String)> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut missing = Vec::new();
+        for item in &mut self.items {
+            match item.kind.as_str() {
+                "link" if !item.url.is_empty() => {
+                    seen.insert(item.url.clone());
+                    targets.push((item.id.clone(), item.url.clone()));
+                }
+                "verge" => {
+                    if let Some(url) = verge_sources.get(&item.id) {
+                        item.source = host_of(url).unwrap_or_else(|| "Clash Verge".into());
+                        if seen.insert(url.clone()) { targets.push((item.id.clone(), url.clone())); }
+                    } else {
+                        missing.push(item.id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        for id in missing {
+            if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+                item.error = "Clash 中找不到该订阅的链接".into();
+            }
+        }
         if targets.is_empty() {
             self.active = None;
             self.loading = false;
-            self.note = "没有可刷新的链接订阅".into();
+            self.note = "没有可刷新的订阅（未找到订阅链接）".into();
             return;
         }
         self.active = Some(if auto { Active::Auto } else { Active::Refresh });
         self.failed = false;
         self.succeeded = false;
+        self.batch_error.clear();
         self.note = if auto { "正在自动刷新流量…".into() } else { "正在刷新流量…".into() };
         for (id, url) in targets { self.fetch(id, url); }
     }
@@ -392,7 +438,7 @@ impl App {
             ui.label(egui::RichText::new("订阅列表").size(12.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let refresh = if self.subscriptions.loading { "刷新中…" } else { "刷新流量" };
-                if ui.add_enabled(!self.subscriptions.loading, egui::Button::new(refresh)).on_hover_text("只更新已加入链接的流量，不读取 Clash 配置").clicked() { self.subscriptions.refresh_all(); }
+                if ui.add_enabled(!self.subscriptions.loading, egui::Button::new(refresh)).on_hover_text("直接请求订阅链接，读取订阅商 subscription-userinfo；不使用 Clash 缓存或本地连接统计").clicked() { self.subscriptions.refresh_all(); }
                 if ui.add_enabled(!self.subscriptions.loading, egui::Button::new("从 Clash 同步")).on_hover_text("仅在点击时读取 Clash Verge 订阅，刷新不会自动同步").clicked() { self.subscriptions.sync_verge(); }
             });
         });
@@ -425,15 +471,19 @@ impl App {
                             if ui.selectable_label(self.subscriptions.selected == item.id, "当前").clicked() { select = Some(item.id.clone()); }
                         });
                     });
-                    let source = if item.source.is_empty() { "Clash 订阅".to_owned() } else { item.source.clone() };
-                    ui.label(egui::RichText::new(format!("来自 {source}")).size(10.5).color(ui.visuals().weak_text_color()));
+                    let source = if item.source.is_empty() { "未知来源".to_owned() } else { item.source.clone() };
+                    let source_label = if item.kind == "link" { format!("来源 {source}（订阅商）") } else if item.kind == "verge" { format!("Clash 快照 · {source}") } else { "本地脚本".to_owned() };
+                    ui.label(egui::RichText::new(source_label).size(10.5).color(ui.visuals().weak_text_color()));
                     if item.kind != "script" {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("已使用 / 总量").size(11.0).color(ui.visuals().weak_text_color()));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let total = if item.total > 0 { bytes(item.total) } else { if item.error.is_empty() { "未知".into() } else { "未获取".into() } };
-                                ui.label(egui::RichText::new(format!("{} / {}", bytes(item.used()), total)).size(12.0).strong());
-                            });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new("已用").size(10.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new(bytes(item.used())).size(12.0).strong());
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("剩余").size(10.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new(item.remaining().map(bytes).unwrap_or_else(|| "未知".into())).size(12.0).strong());
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("总量").size(10.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new(if item.total > 0 { bytes(item.total) } else { "未知".into() }).size(12.0).strong());
                         });
                         if let Some(percent) = item.percent() {
                             ui.add(egui::ProgressBar::new((percent / 100.0).clamp(0.0, 1.0)).desired_height(5.0).fill(Color32::from_rgb(0, 122, 255)));
@@ -443,7 +493,7 @@ impl App {
                         }
                         let expanded = self.subscriptions.expanded.contains(&item.id);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(format!("更新 {} · {}", date_text(item.updated), expire_text(item.expire))).size(10.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new(format!("更新 {} · 重置 {} · {}", date_text(item.updated), reset_text(&item), expire_text(item.expire))).size(10.0).color(ui.visuals().weak_text_color()));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.small_button(if expanded { "收起" } else { "详情" }).clicked() {
                                     if expanded { self.subscriptions.expanded.remove(&item.id); } else { self.subscriptions.expanded.insert(item.id.clone()); }
@@ -451,7 +501,8 @@ impl App {
                             });
                         });
                         if expanded {
-                            ui.label(egui::RichText::new(format!("上传 {} · 下载 {} · 剩余 {}", bytes(item.upload), bytes(item.download), item.remaining().map(bytes).unwrap_or_else(|| "未知".into()))).size(10.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new(format!("上传 {} · 下载 {}", bytes(item.upload), bytes(item.download))).size(10.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new("数据来源：订阅商返回的 subscription-userinfo，不是 Clash 缓存或本地连接统计").size(9.5).color(ui.visuals().weak_text_color()));
                         }
                     } else {
                         ui.label(egui::RichText::new("本地脚本，无流量信息").size(10.5).color(ui.visuals().weak_text_color()));
@@ -462,7 +513,7 @@ impl App {
         }
         if let Some(id) = select { self.subscriptions.selected = id; self.subscriptions.save(); }
         if let Some(id) = remove { self.subscriptions.remove(&id); }
-        ui.label(egui::RichText::new("链接与脚本只记录在岛仔本地，不会修改 Clash Verge 的配置或订阅。").size(11.0).color(ui.visuals().weak_text_color()));
+        ui.label(egui::RichText::new("刷新会直接请求订阅链接并从订阅商读取 subscription-userinfo；不读取 Clash 缓存，也不使用本地连接统计。").size(10.5).color(ui.visuals().weak_text_color()));
     }
 
     pub(crate) fn page_subscription(&mut self, c: &Card) {
@@ -508,19 +559,25 @@ impl App {
         }
         c.text(66.0, 101.0, &c.fit(&format!("来自 {}", if item.source.is_empty() { "Clash 订阅" } else { &item.source }), 9.0, W::Regular, 260.0), 9.0, W::Regular, theme::GRAY, H::Left);
         c.fill(27.0, 111.0, 362.0, 1.0, 0.5, Color32::from_rgb(58, 58, 62));
-        c.text(27.0, 126.0, "已使用 / 总量", 9.0, W::Regular, theme::GRAY, H::Left);
+        c.text(27.0, 126.0, "已用", 9.0, W::Regular, theme::GRAY, H::Left);
+        c.text(58.0, 126.0, &bytes(item.used()), 9.5, W::Semibold, theme::WHITE, H::Left);
+        c.text(220.0, 126.0, "剩余", 9.0, W::Regular, theme::GRAY, H::Left);
+        c.text(251.0, 126.0, &item.remaining().map(bytes).unwrap_or_else(|| "未知".into()), 9.5, W::Semibold, theme::WHITE, H::Left);
+        c.text(27.0, 140.0, "总量", 9.0, W::Regular, theme::GRAY, H::Left);
         let total = if item.total > 0 { bytes(item.total) } else { "未知".into() };
-        c.text(389.0, 126.0, &format!("{} / {}", bytes(item.used()), total), 10.0, W::Semibold, theme::WHITE, H::Right);
+        c.text(58.0, 140.0, &total, 9.5, W::Semibold, theme::WHITE, H::Left);
+        c.text(220.0, 140.0, "重置", 9.0, W::Regular, theme::GRAY, H::Left);
+        c.text(251.0, 140.0, &c.fit(&reset_text(&item), 9.5, W::Semibold, 138.0), 9.5, W::Semibold, theme::WHITE, H::Left);
         if let Some(percent) = item.percent() {
             let bar_w = 362.0;
-            c.fill(27.0, 133.0, bar_w, 4.0, 2.0, Color32::from_rgb(58, 58, 62));
+            c.fill(27.0, 148.0, bar_w, 4.0, 2.0, Color32::from_rgb(58, 58, 62));
             let filled = (bar_w * (percent / 100.0)).clamp(2.0, bar_w);
-            c.fill(27.0, 133.0, filled, 4.0, 2.0, theme::BLUE);
+            c.fill(27.0, 148.0, filled, 4.0, 2.0, theme::BLUE);
         }
-        c.text(27.0, 152.0, &c.fit(&format!("更新 {} · {}", date_text(item.updated), expire_text(item.expire)), 8.5, W::Regular, 330.0), 8.5, W::Regular, theme::DIM, H::Left);
+        c.text(27.0, 163.0, &c.fit(&format!("更新 {} · {}", date_text(item.updated), expire_text(item.expire)), 8.5, W::Regular, 330.0), 8.5, W::Regular, theme::DIM, H::Left);
         if expanded {
-            c.text(27.0, 172.0, &format!("上传 {} · 下载 {}", bytes(item.upload), bytes(item.download)), 9.0, W::Regular, theme::GRAY, H::Left);
-            c.text(389.0, 172.0, &format!("剩余 {}", item.remaining().map(bytes).unwrap_or_else(|| "未知".into())), 9.0, W::Regular, theme::DIM, H::Right);
+            c.text(27.0, 178.0, &format!("上传 {} · 下载 {}", bytes(item.upload), bytes(item.download)), 9.0, W::Regular, theme::GRAY, H::Left);
+            c.text(389.0, 178.0, "来源：订阅商", 9.0, W::Regular, theme::DIM, H::Right);
         }
         if !item.error.is_empty() {
             c.text(27.0, 190.0, &c.fit(&item.error, 9.0, W::Regular, 360.0), 9.0, W::Regular, Color32::from_rgb(214, 108, 60), H::Left);
@@ -589,11 +646,11 @@ fn fetch(url: &str) -> Result<Fetched, String> {
     })?;
     let name = response.header("profile-title").and_then(decode_title)
         .or_else(|| response.header("content-disposition").and_then(filename));
-    let (upload, download, total, expire) = parse_userinfo(response.header("subscription-userinfo").unwrap_or_default());
+    let (upload, download, total, expire, reset, reset_day) = parse_userinfo(response.header("subscription-userinfo").unwrap_or_default());
     if upload == 0 && download == 0 && total == 0 {
-        return Err("订阅未返回流量信息".into());
+        return Err("订阅商未返回 subscription-userinfo 流量信息".into());
     }
-    Ok(Fetched { name, upload, download, total, expire })
+    Ok(Fetched { name, upload, download, total, expire, reset, reset_day })
 }
 
 fn decode_title(value: &str) -> Option<String> {
@@ -606,26 +663,89 @@ fn decode_title(value: &str) -> Option<String> {
 
 fn filename(value: &str) -> Option<String> {
     let name = value.split("filename*=UTF-8''").nth(1).or_else(|| value.split("filename=").nth(1))?;
-    Some(name.trim_matches('"').trim().to_owned())
+    Some(percent_decode(name.trim_matches('"').trim()))
 }
 
-fn parse_userinfo(value: &str) -> (u64, u64, u64, u64) {
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                out.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_userinfo(value: &str) -> (u64, u64, u64, u64, u64, u8) {
     let mut upload = 0;
     let mut download = 0;
     let mut total = 0;
     let mut expire = 0;
+    let mut reset = 0;
+    let mut reset_day = 0;
     for part in value.split(';') {
-        let Some((key, value)) = part.split_once('=') else { continue; };
-        let number = value.trim().parse().unwrap_or(0);
+        let Some((key, raw)) = part.split_once('=') else { continue; };
+        let number = raw.trim().parse().unwrap_or(0);
         match key.trim() {
             "upload" => upload = number,
             "download" => download = number,
             "total" => total = number,
             "expire" => expire = number,
+            "reset" | "reset_time" | "reset_at" => reset = number,
+            "reset_day" => reset_day = number.clamp(0, 31) as u8,
             _ => {}
         }
     }
-    (upload, download, total, expire)
+    (upload, download, total, expire, reset, reset_day)
+}
+
+/// 只解析 Clash 订阅的 uid → URL，供刷新时直连订阅商；URL 不写入岛仔数据。
+fn verge_urls() -> HashMap<String, String> {
+    let Some(base) = std::env::var_os("APPDATA").map(PathBuf::from) else { return HashMap::new(); };
+    let path = base.join("io.github.clash-verge-rev.clash-verge-rev").join("profiles.yaml");
+    let Ok(raw) = std::fs::read_to_string(path) else { return HashMap::new(); };
+    let mut result = HashMap::new();
+    let mut uid = String::new();
+    let mut kind = String::new();
+    let mut url = String::new();
+    for line in raw.lines() {
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("- uid:") && indent == 0 {
+            if kind == "remote" && !uid.is_empty() && !url.is_empty() {
+                result.insert(format!("verge:{uid}"), url.clone());
+            }
+            uid = trimmed.trim_start_matches("- uid:").trim().to_owned();
+            kind.clear();
+            url.clear();
+            continue;
+        }
+        if indent == 2 {
+            if let Some(value) = trimmed.strip_prefix("type:") { kind = value.trim().to_owned(); }
+            else if let Some(value) = trimmed.strip_prefix("url:") { url = value.trim().trim_matches('"').to_owned(); }
+        }
+    }
+    if kind == "remote" && !uid.is_empty() && !url.is_empty() {
+        result.insert(format!("verge:{uid}"), url);
+    }
+    result
 }
 
 fn verge_items() -> Vec<Item> {
@@ -667,7 +787,7 @@ fn verge_item((uid, kind, name, url, updated, upload, download, total, expire): 
         kind: "verge".into(),
         url: String::new(),
         source: host_of(&url).unwrap_or_else(|| "Clash Verge".into()),
-        upload, download, total, expire, updated,
+        upload, download, total, expire, reset: 0, reset_day: 0, updated,
         error: String::new(),
     })
 }
@@ -699,6 +819,16 @@ fn percent_text(percent: f32) -> String {
 fn date_text(epoch: u64) -> String {
     if epoch == 0 { return "未知".into(); }
     chrono::DateTime::from_timestamp(epoch as i64, 0).map(|time| time.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_else(|| "未知".into())
+}
+
+fn reset_text(item: &Item) -> String {
+    if item.reset > 0 {
+        date_text(item.reset)
+    } else if item.reset_day > 0 {
+        format!("每月 {} 日", item.reset_day)
+    } else {
+        "未提供".into()
+    }
 }
 
 fn expire_text(expire: u64) -> String {
