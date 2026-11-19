@@ -269,14 +269,16 @@ impl App {
         ui.add_space(10.0);
 
         ui.horizontal(|ui| {
-            ui.add_sized([ui.available_width() - 76.0, 30.0], egui::TextEdit::singleline(&mut self.subscriptions.link).hint_text("订阅文件链接"));
+            let width = (ui.available_width() - 76.0).max(120.0);
+            subscription_input(ui, &mut self.subscriptions.link, "订阅文件链接", width, 30.0);
             if ui.add(egui::Button::new(egui::RichText::new("新建").color(Color32::WHITE)).fill(Color32::from_rgb(0, 122, 255))).clicked() {
                 self.subscriptions.import_link();
             }
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.add_sized([ui.available_width() - 90.0, 28.0], egui::TextEdit::singleline(&mut self.subscriptions.script).hint_text("脚本文件路径（.js / .yaml）"));
+            let width = (ui.available_width() - 90.0).max(120.0);
+            subscription_input(ui, &mut self.subscriptions.script, "脚本文件路径（.js / .yaml）", width, 28.0);
             if ui.button("导入脚本").clicked() { self.subscriptions.import_script(); }
         });
         if !self.subscriptions.note.is_empty() {
@@ -309,7 +311,8 @@ impl App {
                     ui.horizontal(|ui| {
                         subscription_icon(ui, 26.0);
                         let mut name = item.name.clone();
-                        if ui.add_sized([ui.available_width() - 140.0, 26.0], egui::TextEdit::singleline(&mut name).hint_text("订阅名称")).changed() {
+                        let width = (ui.available_width() - 140.0).max(80.0);
+                        if subscription_input(ui, &mut name, "订阅名称", width, 26.0).changed() {
                             self.subscriptions.names.insert(item.id.clone(), name.clone());
                             if let Some(target) = self.subscriptions.items.iter_mut().find(|target| target.id == item.id) { target.name = name; }
                             self.subscriptions.save();
@@ -420,6 +423,33 @@ impl App {
             c.text(27.0, 190.0, &c.fit(&item.error, 9.0, W::Regular, 360.0), 9.0, W::Regular, Color32::from_rgb(214, 108, 60), H::Left);
         }
     }
+}
+
+
+/// 订阅页输入框：统一边框、背景、占位文字，并让单行文字垂直居中。
+fn subscription_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32, height: f32) -> egui::Response {
+    ui.scope(|ui| {
+        let dark = ui.visuals().dark_mode;
+        let border = if dark { Color32::from_gray(96) } else { Color32::from_gray(168) };
+        let hover = if dark { Color32::from_gray(132) } else { Color32::from_gray(120) };
+        let fill = if dark { Color32::from_rgb(40, 40, 44) } else { Color32::WHITE };
+        let text_color = if dark { Color32::WHITE } else { Color32::from_rgb(28, 32, 38) };
+        let hint_color = if dark { Color32::from_gray(150) } else { Color32::from_gray(118) };
+        let visuals = ui.visuals_mut();
+        visuals.extreme_bg_color = fill;
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, hover);
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(0, 122, 255));
+        ui.add_sized(
+            [width, height],
+            egui::TextEdit::singleline(text)
+                .hint_text(egui::RichText::new(hint).color(hint_color))
+                .vertical_align(egui::Align::Center)
+                .margin(egui::Margin::symmetric(9, 5))
+                .text_color(text_color),
+        )
+    })
+    .inner
 }
 
 fn subscription_icon(ui: &mut egui::Ui, size: f32) {
