@@ -33,6 +33,7 @@ pub mod clipboard;
 pub mod side_dock;
 mod task_picker;
 pub mod model;
+mod subscription;
 pub mod renderer;
 pub mod otp;
 pub mod quota;
