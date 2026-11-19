@@ -117,6 +117,15 @@ impl State {
         }
     }
 
+    fn prefer_link_selected(&mut self) {
+        if self.items.iter().find(|item| item.id == self.selected).is_some_and(|item| item.is_verge()) {
+            if let Some(link) = self.items.iter().find(|item| item.kind == "link") {
+                self.selected = link.id.clone();
+            }
+        }
+        self.ensure_selected();
+    }
+
     fn merge_verge(&mut self) {
         for mut item in verge_items() {
             if self.hidden.contains(&item.id) { continue; }
@@ -128,6 +137,7 @@ impl State {
                 existing.expire = item.expire;
                 existing.updated = item.updated;
                 existing.name = item.name;
+                existing.source = item.source;
             } else if !self.items.iter().any(|existing| existing.name.trim().eq_ignore_ascii_case(item.name.trim())) {
                 self.items.push(item);
             }
@@ -265,6 +275,7 @@ impl State {
     /// 只刷新已加入链接的流量，不读取/合并 Clash 配置。
     fn refresh_all(&mut self) {
         self.next_auto = 0.0;
+        self.prefer_link_selected();
         self.refresh(false);
     }
 
@@ -296,7 +307,11 @@ impl State {
     }
 
     fn dedupe(&mut self) {
-        // 只去掉“Clash 镜像”和本地订阅同名的重复项，保留多个同名的手动链接。
+        // 同一来源以导入链接为准：清掉对应 host 的 Clash 镜像。
+        let link_sources: HashSet<String> = self.items.iter().filter(|item| item.kind == "link")
+            .map(|item| item.source.trim().to_lowercase()).filter(|source| !source.is_empty()).collect();
+        self.items.retain(|item| !item.is_verge() || item.source.trim().is_empty() || !link_sources.contains(&item.source.trim().to_lowercase()));
+        // 再按名称去重；保留多个同名的手动链接。
         let mut seen: HashMap<String, bool> = HashMap::new();
         self.items.retain(|item| {
             let key = item.name.trim().to_lowercase();
@@ -306,7 +321,7 @@ impl State {
                 Some(existing_verge) => !(*existing_verge || item.is_verge()),
             }
         });
-        self.ensure_selected();
+        self.prefer_link_selected();
     }
 }
 
@@ -618,19 +633,20 @@ fn verge_items() -> Vec<Item> {
     let path = base.join("io.github.clash-verge-rev.clash-verge-rev").join("profiles.yaml");
     let Ok(raw) = std::fs::read_to_string(path) else { return Vec::new(); };
     let mut result = Vec::new();
-    let mut current: Option<(String, String, String, u64, u64, u64, u64, u64)> = None;
+    let mut current: Option<(String, String, String, String, u64, u64, u64, u64, u64)> = None;
     for line in raw.lines() {
         let indent = line.len() - line.trim_start().len();
         let trimmed = line.trim_start();
         if trimmed.starts_with("- uid:") && indent == 0 {
             if let Some(item) = current.take().and_then(verge_item) { result.push(item); }
-            current = Some((trimmed.trim_start_matches("- uid:").trim().to_owned(), String::new(), String::new(), 0, 0, 0, 0, 0));
+            current = Some((trimmed.trim_start_matches("- uid:").trim().to_owned(), String::new(), String::new(), String::new(), 0, 0, 0, 0, 0));
             continue;
         }
-        let Some((_, kind, name, updated, upload, download, total, expire)) = current.as_mut() else { continue; };
+        let Some((_, kind, name, url, updated, upload, download, total, expire)) = current.as_mut() else { continue; };
         if indent == 2 {
             if let Some(value) = trimmed.strip_prefix("type:") { *kind = value.trim().to_owned(); }
             else if let Some(value) = trimmed.strip_prefix("name:") { *name = value.trim().trim_matches('"').to_owned(); }
+            else if let Some(value) = trimmed.strip_prefix("url:") { *url = value.trim().trim_matches('"').to_owned(); }
             else if let Some(value) = trimmed.strip_prefix("updated:") { *updated = value.trim().parse().unwrap_or(0); }
         } else if indent == 4 {
             if let Some(value) = trimmed.strip_prefix("upload:") { *upload = value.trim().parse().unwrap_or(0); }
@@ -643,14 +659,14 @@ fn verge_items() -> Vec<Item> {
     result
 }
 
-fn verge_item((uid, kind, name, updated, upload, download, total, expire): (String, String, String, u64, u64, u64, u64, u64)) -> Option<Item> {
+fn verge_item((uid, kind, name, url, updated, upload, download, total, expire): (String, String, String, String, u64, u64, u64, u64, u64)) -> Option<Item> {
     if kind != "remote" { return None; }
     Some(Item {
         id: format!("verge:{uid}"),
         name: if name.is_empty() || name == "null" { "Clash 订阅".into() } else { name },
         kind: "verge".into(),
         url: String::new(),
-        source: "Clash Verge".into(),
+        source: host_of(&url).unwrap_or_else(|| "Clash Verge".into()),
         upload, download, total, expire, updated,
         error: String::new(),
     })
