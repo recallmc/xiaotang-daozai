@@ -98,7 +98,8 @@ impl App{
         let mut accounts:Vec<Account>=self.mail.accounts.iter().filter(|a|a.enabled&&account.is_none_or(|email|a.email.eq_ignore_ascii_case(email))).cloned().collect();
         if action==Action::ReadAll{accounts.retain(|a|self.mail.manage.data.contains_key(&(crate::mail::key(a),folder))&&self.mail.manage.identities.get(&crate::mail::key(a))==Some(a));}
         // 按账号放行：某个账号正在同步或刚失败，不影响其他账号的整理。
-        accounts.retain(|a|{let key=crate::mail::key(a);!self.mail.manage.pending.contains(&key)&&self.mail.manage.failed.get(&key).is_none_or(|until|*until<=self.t)});
+        // 失败冷却只限制自动刷新；用户主动的已读/移动操作仍应尝试。
+        accounts.retain(|a|{let key=crate::mail::key(a);!self.mail.manage.pending.contains(&key)&&(action!=Action::Load||self.mail.manage.failed.get(&key).is_none_or(|until|*until<=self.t))});
         if accounts.is_empty(){return;}
         if action!=Action::Load && accounts.iter().any(|a|!self.mail.manage.data.contains_key(&(crate::mail::key(a),folder))||self.mail.manage.identities.get(&crate::mail::key(a))!=Some(a)){
             self.mail.manage.message="请等待邮件状态同步完成".into();return;
