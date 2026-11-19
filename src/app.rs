@@ -1881,11 +1881,16 @@ impl App {
         let body=messenger_rect.filter(|_|outside_badge.is_none()).map_or(panel,|badge|panel.union(badge));
         let body=notice_shape.map_or(body,|notice|body.union(notice));
         let minimal_pill = self.effective_minimal() && !self.island_lyrics_active() && self.notice.is_none() && self.t>=self.notification_bell_until && pc < 0.02;
-        let flare = if minimal_pill || pill { 0.0 } else { lerp(5.0, FLARE, pc) };
+        // 形状进度要跟随宽度和高度中更靠前的一项：宽度弹簧先冲过目标时，
+        // 若仍用高度进度算圆角/外翻，宽而扁的中间帧会看起来像普通长方形。
+        let (base_w, _) = self.base_size();
+        let width_progress = ((self.w.pos - base_w) / (PW - base_w).max(1.0)).clamp(0.0, 1.0);
+        let shape_pc = if side { pc } else { pc.max(width_progress) };
+        let flare = if minimal_pill || pill { 0.0 } else { lerp(5.0, FLARE, shape_pc) };
         let k = (w / PW).clamp(0.3, 1.1);
         let thickness = if side { crate::side_dock::SIDE_BAR_W } else { BAR_H };
-        let radius = if minimal_pill { BAR_H_MIN / 2.0 } else if pill { (w.min(h) * 0.5).min(lerp(thickness * 0.5, 26.0, pc)) } else { lerp(12.5, RAD * k.min(1.0), pc) };
-        let flare_h = lerp(8.0, FLARE_H, pc);
+        let radius = if minimal_pill { BAR_H_MIN / 2.0 } else if pill { (w.min(h) * 0.5).min(lerp(thickness * 0.5, 26.0, shape_pc)) } else { lerp(12.5, RAD * k.min(1.0), shape_pc) };
+        let flare_h = lerp(8.0, FLARE_H, shape_pc);
         let thick = glass::thickness(PH);
         let glass_skin = self.settings.skin.is_glass();
         let layer = painter.layer_id();
