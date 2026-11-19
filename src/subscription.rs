@@ -12,6 +12,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
+/// 流量自动刷新间隔：5 分钟。
+const AUTO_REFRESH_SECS: f64 = 300.0;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Item {
     pub id: String,
@@ -56,7 +59,14 @@ pub(crate) struct State {
     rx: Receiver<(String, Result<Fetched, String>)>,
     path: Option<PathBuf>,
     loading: bool,
+    active: Option<Active>,
+    failed: bool,
+    succeeded: bool,
+    next_auto: f64,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Active { Refresh, Fetch, Auto }
 
 struct Fetched {
     name: Option<String>,
@@ -70,7 +80,7 @@ impl State {
     pub(crate) fn load() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         if cfg!(test) {
-            return Self { items: Vec::new(), selected: String::new(), names: HashMap::new(), hidden: HashSet::new(), expanded: HashSet::new(), link: String::new(), script: String::new(), note: String::new(), pending: HashSet::new(), tx, rx, path: None, loading: false };
+            return Self { items: Vec::new(), selected: String::new(), names: HashMap::new(), hidden: HashSet::new(), expanded: HashSet::new(), link: String::new(), script: String::new(), note: String::new(), pending: HashSet::new(), tx, rx, path: None, loading: false, active: None, failed: false, succeeded: false, next_auto: 0.0 };
         }
         let path = crate::model::config_dir().join("subscriptions.json");
         let saved: Saved = std::fs::read(&path).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default();
@@ -88,11 +98,15 @@ impl State {
             rx,
             path: Some(path),
             loading: false,
+            active: None,
+            failed: false,
+            succeeded: false,
+            next_auto: 0.0,
         };
-        state.merge_verge();
         for item in &mut state.items {
             if let Some(name) = state.names.get(&item.id) { item.name = name.clone(); }
         }
+        state.dedupe();
         state.ensure_selected();
         state
     }
@@ -114,7 +128,7 @@ impl State {
                 existing.expire = item.expire;
                 existing.updated = item.updated;
                 existing.name = item.name;
-            } else {
+            } else if !self.items.iter().any(|existing| existing.name.trim().eq_ignore_ascii_case(item.name.trim())) {
                 self.items.push(item);
             }
         }
@@ -123,13 +137,23 @@ impl State {
     fn save(&mut self) {
         let Some(path) = &self.path else { return; };
         let saved = Saved {
-            items: self.items.iter().filter(|item| !item.is_verge()).cloned().collect(),
+            items: self.items.clone(),
             names: self.names.clone(),
             hidden: self.hidden.clone(),
             selected: self.selected.clone(),
         };
         let Ok(raw) = serde_json::to_vec(&saved) else { self.note = "订阅记录保存失败".into(); return; };
         if crate::model::atomic_write(path, &raw).is_err() { self.note = "订阅记录保存失败，请检查数据目录权限".into(); }
+    }
+
+    /// 每 5 分钟自动刷新一次已加入链接；只在没有其它请求时执行。
+    pub(crate) fn tick(&mut self, now: f64) {
+        if self.next_auto <= 0.0 { self.next_auto = now + AUTO_REFRESH_SECS; return; }
+        if now < self.next_auto { return; }
+        self.next_auto = now + AUTO_REFRESH_SECS;
+        if self.loading || self.active.is_some() { return; }
+        if !self.items.iter().any(|item| item.kind == "link") { return; }
+        self.refresh(true);
     }
 
     pub(crate) fn poll(&mut self) {
@@ -147,12 +171,31 @@ impl State {
                         item.expire = fetched.expire;
                         item.updated = now();
                         item.error.clear();
+                        self.succeeded = true;
                     }
-                    Err(error) => item.error = error,
+                    Err(error) => { item.error = error; self.failed = true; }
                 }
             }
         }
         self.loading = !self.pending.is_empty();
+        if !self.loading {
+            if let Some(active) = self.active.take() {
+                self.note = match active {
+                    Active::Refresh if self.failed && !self.succeeded => "刷新失败，请检查网络或订阅链接".into(),
+                    Active::Refresh if self.failed => "部分订阅刷新失败，请检查网络或链接".into(),
+                    Active::Refresh => "流量已刷新".into(),
+                    Active::Auto if self.failed => "自动刷新失败，将在下次重试".into(),
+                    Active::Auto => "流量已自动刷新".into(),
+                    Active::Fetch if self.failed && !self.succeeded => "订阅信息获取失败，请检查链接或网络".into(),
+                    Active::Fetch if self.failed => "部分订阅信息获取失败".into(),
+                    Active::Fetch => "订阅信息已更新".into(),
+                };
+                self.failed = false;
+                let succeeded = self.succeeded;
+                self.succeeded = false;
+                if succeeded { self.save(); }
+            }
+        }
     }
 
     fn import_link(&mut self) {
@@ -170,7 +213,10 @@ impl State {
         self.items.push(Item { id: id.clone(), name: source.clone(), kind: "link".into(), url: value.clone(), source, upload: 0, download: 0, total: 0, expire: 0, updated: 0, error: "正在获取订阅信息…".into() });
         self.selected = id.clone();
         self.link.clear();
-        self.note = "已添加订阅，正在获取流量信息".into();
+        self.note = "正在获取订阅信息…".into();
+        self.active = Some(Active::Fetch);
+        self.failed = false;
+        self.succeeded = false;
         self.save();
         self.fetch(id, value);
     }
@@ -216,11 +262,51 @@ impl State {
         std::thread::spawn(move || { let result = fetch(&url); let _ = tx.send((id, result)); });
     }
 
+    /// 只刷新已加入链接的流量，不读取/合并 Clash 配置。
     fn refresh_all(&mut self) {
-        self.merge_verge();
+        self.next_auto = 0.0;
+        self.refresh(false);
+    }
+
+    fn refresh(&mut self, auto: bool) {
         let targets: Vec<(String, String)> = self.items.iter().filter(|item| item.kind == "link").map(|item| (item.id.clone(), item.url.clone())).collect();
+        if targets.is_empty() {
+            self.active = None;
+            self.loading = false;
+            self.note = "没有可刷新的链接订阅".into();
+            return;
+        }
+        self.active = Some(if auto { Active::Auto } else { Active::Refresh });
+        self.failed = false;
+        self.succeeded = false;
+        self.note = if auto { "正在自动刷新流量…".into() } else { "正在刷新流量…".into() };
         for (id, url) in targets { self.fetch(id, url); }
-        self.note = "正在刷新订阅信息".into();
+    }
+
+    /// 用户显式触发：把 Clash Verge 当前订阅合并进来；刷新不会调用这里。
+    fn sync_verge(&mut self) {
+        let before: HashMap<String, (u64, u64, u64, u64)> = self.items.iter().filter(|item| item.is_verge())
+            .map(|item| (item.id.clone(), (item.upload, item.download, item.total, item.expire))).collect();
+        self.merge_verge();
+        self.dedupe();
+        self.save();
+        let added = self.items.iter().filter(|item| item.is_verge() && !before.contains_key(&item.id)).count();
+        let updated = self.items.iter().filter(|item| item.is_verge()).filter(|item| before.get(&item.id).is_some_and(|old| *old != (item.upload, item.download, item.total, item.expire))).count();
+        self.note = if added + updated > 0 { format!("已从 Clash 同步：新增 {added}，更新 {updated}") } else { "已从 Clash 同步，订阅没有变化".into() };
+    }
+
+    fn dedupe(&mut self) {
+        // 只去掉“Clash 镜像”和本地订阅同名的重复项，保留多个同名的手动链接。
+        let mut seen: HashMap<String, bool> = HashMap::new();
+        self.items.retain(|item| {
+            let key = item.name.trim().to_lowercase();
+            if key.is_empty() { return true; }
+            match seen.get(&key) {
+                None => { seen.insert(key, item.is_verge()); true }
+                Some(existing_verge) => !(*existing_verge || item.is_verge()),
+            }
+        });
+        self.ensure_selected();
     }
 }
 
@@ -290,7 +376,9 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("订阅列表").size(12.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!self.subscriptions.loading, egui::Button::new("刷新")).clicked() { self.subscriptions.refresh_all(); }
+                let refresh = if self.subscriptions.loading { "刷新中…" } else { "刷新流量" };
+                if ui.add_enabled(!self.subscriptions.loading, egui::Button::new(refresh)).on_hover_text("只更新已加入链接的流量，不读取 Clash 配置").clicked() { self.subscriptions.refresh_all(); }
+                if ui.add_enabled(!self.subscriptions.loading, egui::Button::new("从 Clash 同步")).on_hover_text("仅在点击时读取 Clash Verge 订阅，刷新不会自动同步").clicked() { self.subscriptions.sync_verge(); }
             });
         });
         ui.add_space(6.0);

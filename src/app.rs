@@ -1692,6 +1692,8 @@ impl App {
         self.last_t = Some(env.t);
         self.t = env.t;
         self.quota_tick();
+        self.subscriptions.poll();
+        if self.module_on(SUBSCRIPTION_PAGE) { self.subscriptions.tick(self.t); }
         self.weather_tick();
         self.current_hour=env.hour();
         self.system_idle=env.idle_seconds;
