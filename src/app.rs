@@ -76,7 +76,7 @@ const MINIMAL_HOVER_INTENT: f64 = 0.40;
 const LEAVE_DELAY: f64 = 0.12;
 const SWELL: (f32, f32) = (1.075, 1.13);
 // 展开：欠阻尼，末段约 5% 过冲后回落；高度略软于宽度，像「垂落」下来。
-const OPEN_W: (f32, f32) = (330.0, 0.70);
+const OPEN_W: (f32, f32) = (290.0, 0.74);
 const OPEN_H: (f32, f32) = (290.0, 0.74);
 // 收起：临界阻尼，约 0.18 s 干净收回，无回弹。
 const CLOSE: (f32, f32) = (620.0, 1.0);
@@ -2532,6 +2532,9 @@ impl App {
                 self.h.tune(OPEN_H.0, OPEN_H.1);
                 self.w.target = PW;
                 self.h.target = self.expanded_height();
+                // 普通悬停从静止开始，宽高用同一组弹簧参数，避免宽度先冲出去形成宽扁中间帧。
+                self.w.vel = 0.0;
+                self.h.vel = 0.0;
                 if self.drag_hot {
                     // 拖入不等缓冲，直接给一点初速度，30 ms 内就能看到形变
                     self.w.vel = self.w.vel.max(600.0);
@@ -2572,6 +2575,16 @@ impl App {
         let (prev_w,prev_h)=(self.w.pos,self.h.pos);
         self.w.step(dt);
         self.h.step(dt);
+        // 顶部/底部停靠展开时，宽度不能领先高度太多；否则中间帧是宽扁条。
+        if self.open && !self.side() {
+            let (bw, bh) = self.base_size();
+            let hp = ((self.h.pos - bh) / (self.expanded_height() - bh).max(1.0)).clamp(0.0, 1.0);
+            let max_w = bw + (PW - bw) * hp;
+            if self.w.pos > max_w {
+                self.w.pos = max_w;
+                self.w.vel = 0.0;
+            }
+        }
         // 仅在从外侧越过目标时收住，扩展提示条时不强制跳到目标宽度。
         if !self.open {
             if prev_w>=bw && self.w.pos<bw {self.w.snap(bw);}
