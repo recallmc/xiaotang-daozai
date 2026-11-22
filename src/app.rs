@@ -638,6 +638,8 @@ pub struct App {
     pub(crate) open: bool,
     hover_since: Option<f64>,
     leave_since: Option<f64>,
+    /// 收起后的短暂冷却，避免边缘光标抖动立刻重新展开。
+    reopen_after: f64,
     /// 前台切换导致的强制收起：光标离开前不再自动展开。
     pub hover_lock: bool,
     pub(crate) reveal: f32,
@@ -833,6 +835,7 @@ impl App {
             open: false,
             hover_since: None,
             leave_since: None,
+            reopen_after: 0.0,
             hover_lock: false,
             reveal: 0.0,
             position_drag: None,
@@ -1860,6 +1863,7 @@ impl App {
         } else {self.wheel_delta=0.0;}
         let volume_dragging=self.music_volume_open && ctx.is_being_dragged(egui::Id::new(("card-drag",true,"m-volume-track")));
         let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || volume_dragging || (self.is_editing() && self.open);
+        let want = want && (self.open || self.t >= self.reopen_after);
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
 
@@ -2139,12 +2143,18 @@ impl App {
             Rect::from_min_size(Pos2::new(cx-width/2.0,top),Vec2::new(width,height))
         } else if self.notice.is_some()&&!self.compact_notices()&&!self.open {
             let (w,h)=self.base_size();Rect::from_min_size(Pos2::new(cx-(w+8.0)/2.0,top),Vec2::new(w+8.0,h+6.0))
-        } else if p > 0.04 || self.open {
-            Rect::from_min_size(Pos2::new(cx - PW / 2.0 - 4.0, top), Vec2::new(PW + 8.0, self.expanded_height() + 2.0))
         } else {
             let (bw,bh)=self.base_size();
             let (hit_w,hit_h)=(bw+12.0,bh+4.0);
-            Rect::from_min_size(Pos2::new(cx-hit_w/2.0,top),Vec2::new(hit_w,hit_h))
+            let base=Rect::from_min_size(Pos2::new(cx-hit_w/2.0,top),Vec2::new(hit_w,hit_h));
+            // 悬停、展开或收起期间都使用“小条 ∪ 完整面板”的稳定命中区。
+            // 若只在 p>0.04 时切成完整面板，光标停在边缘会反复跨越阈值，触发开/合循环。
+            if self.open || self.hover_since.is_some() || self.leave_since.is_some() || p > 0.04 {
+                let target=Rect::from_min_size(Pos2::new(cx-PW/2.0-8.0,top),Vec2::new(PW+16.0,self.expanded_height().max(PH)+8.0));
+                base.union(target)
+            } else {
+                base
+            }
         }
     }
 
@@ -2554,6 +2564,7 @@ impl App {
                 let since = *self.leave_since.get_or_insert(t);
                 if t - since >= LEAVE_DELAY {
                     self.open = false;
+                    self.reopen_after = t + 0.22;
                     self.music_volume_open=false;
                     self.leave_since = None;
                     self.w.tune(CLOSE.0, CLOSE.1);
@@ -2575,10 +2586,12 @@ impl App {
         let (prev_w,prev_h)=(self.w.pos,self.h.pos);
         self.w.step(dt);
         self.h.step(dt);
-        // 顶部/底部停靠展开时，宽度不能领先高度太多；否则中间帧是宽扁条。
-        if self.open && !self.side() {
-            let (bw, bh) = self.base_size();
-            let hp = ((self.h.pos - bh) / (self.expanded_height() - bh).max(1.0)).clamp(0.0, 1.0);
+        // 顶部/底部停靠时，宽度必须跟着高度走：展开和收起都不能留下宽扁中间帧。
+        let (bw, bh) = self.base_size();
+        // 高度先回到小条后，宽度可能还停在展开宽度；只要宽度明显超出小条就继续收。
+        let closing = !self.open && self.notice.is_none() && self.w.pos > bw + 24.0;
+        if (self.open || closing) && !self.side() {
+            let hp = ((self.h.pos - bh) / (self.expanded_height().max(PH) - bh).max(1.0)).clamp(0.0, 1.0);
             let max_w = bw + (PW - bw) * hp;
             if self.w.pos > max_w {
                 self.w.pos = max_w;
