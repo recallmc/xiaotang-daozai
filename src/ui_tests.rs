@@ -8388,3 +8388,36 @@ fn every_module_settings_tab_maps_to_its_page(){
     }
     pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).collect::<Vec<_>>(),"每个功能页面各有一个设置分页");
 }
+
+/// 临时诊断：把展开过程逐帧光栅化落盘，人工核对形状。
+/// 仅当设置 DAOZAI_MORPH_DUMP=<目录> 时执行。
+#[test]
+fn morph_expansion_frames_dump() {
+    let Ok(dir) = std::env::var("DAOZAI_MORPH_DUMP") else { return; };
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.browser_minimal = false;
+    h.app.settings.pet = false;
+    let outside = Pos2::new(WIN_W / 2.0, 200.0);
+    for _ in 0..40 { h.cursor = Some(outside); h.frame(vec![]); }
+    let inside = Pos2::new(WIN_W / 2.0, 12.0);
+    let ppp = h.ctx.pixels_per_point();
+    let (w, hgt) = ((crate::app::CANVAS_W * ppp) as usize, (crate::app::WIN_H * ppp) as usize);
+    let mut n = 0;
+    for i in 0..90 {
+        h.cursor = Some(inside);
+        h.frame(vec![egui::Event::PointerMoved(inside)]);
+        let prog = h.app.progress();
+        if i % 2 == 0 {
+            let mut raster = crate::preview_raster::Raster::new(w, hgt);
+            raster.buf.fill([0.16, 0.17, 0.20, 1.0]);
+            raster.draw(&h.ctx.tessellate(h.shapes.clone(), ppp), ppp);
+            let mut rgba = Vec::new();
+            raster.to_rgba8(&mut rgba);
+            image::save_buffer(std::path::Path::new(&dir).join(format!("mf_{:03}.png", i)), &rgba, w as u32, hgt as u32, image::ColorType::Rgba8).unwrap();
+            n += 1;
+            eprintln!("mf_{:03} progress={:.3}", i, prog);
+        }
+    }
+    eprintln!("dumped {n} frames to {dir}");
+}
