@@ -5963,7 +5963,7 @@ fn clock_12h_formats_boundaries_and_persists() {
     h.app.settings.save();
     assert!(crate::model::Settings::load().clock_12h);
     h.app.settings.pet=false;
-    h.quota_accounts(5);
+    h.quota_accounts(20);
     for _ in 0..90 { h.frame(vec![]); }
     let text_rect=|label:&str|h.shapes.iter().find_map(|s|match &s.shape {
         egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect()),_=>None,
@@ -8420,4 +8420,31 @@ fn morph_expansion_frames_dump() {
         }
     }
     eprintln!("dumped {n} frames to {dir}");
+}
+
+/// 「岛一变长就出问题」的端到端护栏：
+/// 把常驻条撑到超过宽度上限，再悬停胀大，身体不能顶破 BODY_MAX，
+/// 否则两端圆角没有落脚空间、电量图标会被身体边缘平切。
+#[test]
+fn long_resident_bar_never_outgrows_the_body_cap() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.browser_minimal = false;
+    h.app.settings.pet = false;
+    h.quota_accounts(20);
+    for _ in 0..60 {
+        h.cursor = Some(Pos2::new(WIN_W / 2.0, 200.0));
+        h.frame(vec![]);
+    }
+    let layout_w = h.app.resident.target.width;
+    assert!(layout_w > crate::app::BODY_MAX, "测试前提：常驻条({layout_w})应长于身体上限({})", crate::app::BODY_MAX);
+    // 悬停胀大阶段
+    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.15);
+    let w = h.app.current_width();
+    assert!(w <= crate::app::BODY_MAX + 0.5, "常驻条变长后身体宽度顶破上限：{w} > {}", crate::app::BODY_MAX);
+    // 展开、收起全过程都不能超过上限
+    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.2);
+    assert!(h.app.current_width() <= crate::app::BODY_MAX + 0.5, "展开中身体超上限");
+    h.hover(Pos2::new(WIN_W / 2.0, 260.0), 1.5);
+    assert!(h.app.current_width() <= crate::app::BODY_MAX + 0.5, "收起中身体超上限");
 }

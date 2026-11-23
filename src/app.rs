@@ -52,6 +52,15 @@ pub const FLARE: f32 = 17.6; // 顶部外翻肩宽
 pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
 pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
+/// 岛体允许的最大宽度：窗口宽减去两端圆角的落脚空间。
+///
+/// 常驻条越挂越多时宽度会一路顶到上限。以前的上限 `WIN_W-32` 让身体几乎贴满窗口，
+/// 圆角没有落脚处、常驻内容也被缩放到正好等于身体宽度 —— 两者零余量，
+/// 电量图标再往外带 10px 就必然被身体边缘切掉，两端看上去就是直边。
+/// 用户反馈「岛长度一变长就开始出问题」就是这个。
+pub const BODY_MAX: f32 = WIN_W - 36.0;
+/// 常驻条内容的可用宽度：再比身体窄一圈，保证两端图标与圆角之间还有呼吸位。
+const CONTENT_MAX: f32 = BODY_MAX - 26.0;
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
 /// 胶囊皮肤与屏幕顶边的间隙。
@@ -159,6 +168,27 @@ mod island_shape_tests {
     fn resting_bar_is_a_capsule() {
         let r = island_radius(543.0, BAR_H, 0.0, false, BAR_H);
         assert!((r - BAR_H * 0.5).abs() < 0.01, "收起态应是胶囊，实际圆角 {r}");
+    }
+
+    /// 常驻条再长，也不能把身体顶到窗口边缘。
+    ///
+    /// 这是「岛一变长就出问题」的回归护栏：宽度顶到上限后，
+    /// 必须还给两端圆角留出落脚空间，并且常驻内容要明显窄于身体，
+    /// 否则电量图标贴着身体边缘，会被平直切掉。
+    #[test]
+    fn wide_resident_bar_keeps_rounding_room_and_content_margin() {
+        let rest_radius = BAR_H * 0.5;
+        assert!(
+            BODY_MAX + rest_radius * 2.0 <= WIN_W,
+            "身体宽度没给两端圆角留空间：BODY_MAX={BODY_MAX} 圆角={rest_radius} 窗口={WIN_W}"
+        );
+        assert!(
+            CONTENT_MAX <= BODY_MAX - 24.0,
+            "常驻内容必须明显窄于身体，否则两端图标贴边被切：CONTENT_MAX={CONTENT_MAX} BODY_MAX={BODY_MAX}"
+        );
+        // 内容居中后，两端各留出的余量要够容纳图标外沿。
+        let margin = (BODY_MAX - CONTENT_MAX) * 0.5;
+        assert!(margin >= 12.0, "两端余量太小：{margin}");
     }
 }
 
@@ -1739,7 +1769,7 @@ impl App {
         } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
             (BAR_W_MIN, BAR_H_MIN)
         } else {
-            (self.resident.target.width.min(WIN_W-32.0), BAR_H)
+            (self.resident.target.width.min(BODY_MAX), BAR_H)
         }
     }
 
@@ -1947,7 +1977,10 @@ impl App {
         let (sx, sy) = self.drag_scale();
         // 拿起放大不能超出透明画布，否则两端会被切掉。
         let (max_w, max_h) = if side {(crate::side_dock::SIDE_W, crate::side_dock::SIDE_H)} else {(WIN_W, WIN_H)};
-        let (w, h) = ((self.w.pos * sx).min((max_w - 24.0).max(self.w.pos)), (self.h.pos * sy).min((max_h - 24.0).max(self.h.pos)));
+        // 岛体必须完整落在画布可见区内。
+        // 旧写法 `.min((max_w - 24).max(self.w.pos))` 里那个 `.max(self.w.pos)`
+        // 把钳制变成了空操作，宽度顶到上限时两端圆角直接被窗口边缘切掉。
+        let (w, h) = ((self.w.pos * sx).min(max_w - 16.0), (self.h.pos * sy).min(max_h - 16.0));
         let panel = self.island_rect(win, w, h);
         let messenger_rect=self.messenger_badge_rect(win,panel);
         let appear=self.messenger_appear();
@@ -2086,7 +2119,7 @@ impl App {
         if pet_alpha>0.004 && !minimal_pill {
             let y=(h.min(self.base_size().1)-BAR_H).max(0.0)/2.0;
             // 吉祥物跟随皮肤换色：浅色底上变成深色版本，保持清晰。
-            let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{((WIN_W-32.0)/self.resident.target.width).min(1.0)};
+            let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{(CONTENT_MAX/self.resident.target.width).min(1.0)};
             self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,self.skin_palette());
         }
         if reveal > 0.004 && !banner && !restoring_lyrics {
@@ -2644,7 +2677,9 @@ impl App {
                 // 悬停时轻微胀大：厚度方向胀得多一点（侧边停靠时厚度是宽度）。
                 let (sw,sh)=if self.side(){(SWELL.1,SWELL.0)}else{SWELL};
                 // 常驻条比面板窄时，胀大量不越过面板宽度，免得岛比展开后还宽。
-                self.w.target = if bw<PW {(bw*sw).min(PW)} else {bw*sw};
+                // 胀大也不能顶破 BODY_MAX：常驻条已经贴在上限时不再横向胀，
+                // 否则身体被窗口边缘切掉、两端圆角消失。
+                self.w.target = if bw<PW {(bw*sw).min(PW)} else {(bw*sw).min(BODY_MAX)};
                 self.h.target = bh * sh;
             }
         } else {
@@ -2690,7 +2725,8 @@ impl App {
     // ---------------------------------------------------------------
     fn shared_header(&mut self, base: &Card, cx: f32, p: f32, reveal: f32, env: &Env) {
         let local_cx = cx - base.origin.x;
-        let fit=((WIN_W-32.0)/self.resident.target.width).min(1.0);
+        // 内容按 CONTENT_MAX 缩放：常驻条再长也留出两端呼吸位，图标不会被身体边缘切。
+        let fit=(CONTENT_MAX/self.resident.target.width).min(1.0);
         let fitted=base.scaled(local_cx,15.0,lerp(fit,1.0,p));
         let base=&fitted;
         let lyric=self.island_lyric().map(|(index,_)|index);
