@@ -170,6 +170,30 @@ mod island_shape_tests {
         assert!((r - BAR_H * 0.5).abs() < 0.01, "收起态应是胶囊，实际圆角 {r}");
     }
 
+    /// 形状参数必须按「真正要画的那个矩形」算。
+    ///
+    /// 用户截图里的样子：奶色块 510×44（常驻条与通知胶囊的并集），
+    /// 但圆角只有 2.25、外翻 1.35 —— 因为当时用的是弹簧高度（极小态 4.5）。
+    /// 结果就是一块硬边矩形。这条测试锁死：只要身体是 44 高，圆角就必须是 22 量级。
+    #[test]
+    fn shape_follows_the_drawn_rect_not_the_spring_height() {
+        // 通知并集把身体撑到 44 高，而弹簧还在极小态。
+        for &drawn_h in &[BAR_H, 44.0, 120.0, PH] {
+            let r = island_radius(510.0, drawn_h, 0.0, false, BAR_H);
+            let f = island_flare(drawn_h, 0.0, false);
+            let half = drawn_h * 0.5;
+            let want = half.min(RAD);
+            assert!(
+                (r - want).abs() < 0.05,
+                "身体 {drawn_h} 高的圆角应是 {want}，实际 {r}"
+            );
+            assert!(f > 0.4, "身体 {drawn_h} 高的外翻不能归零，实际 {f}");
+        }
+        // 对照：如果还用极小态的高度算，就会得到 2.25 —— 那正是那个矩形的来源。
+        let wrong = island_radius(510.0, BAR_H_MIN, 0.0, false, BAR_H);
+        assert!(wrong < 3.0, "极小态圆角本来就该很小：{wrong}");
+    }
+
     /// 常驻条再长，也不能把身体顶到窗口边缘。
     ///
     /// 这是「岛一变长就出问题」的回归护栏：宽度顶到上限后，
@@ -837,6 +861,8 @@ pub struct App {
     pub displays:Vec<crate::display_layout::Display>,
     browser_at_top:bool,
     browser_minimal_active:bool,
+    /// 形状自检日志的节流时间戳（每 1 秒最多一条）。
+    shape_log_at:f64,
     /// 毛玻璃着色量（平滑过渡，避免背景变化时闪烁）；0 表示尚未初始化。
     glass_tint:f32,
     pub(crate) fluid:crate::fluid::Fluid,
@@ -1001,7 +1027,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, shape_log_at:0.0, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
@@ -1998,9 +2024,35 @@ impl App {
         // 完全展开的面板才收敛到面板圆角。
         // 以前最小胶囊（浏览器置顶收起）时圆角会瞬间掉到 2px、外翻直接归零，
         // 岛体在收窄途中变成硬邦邦的长方形 —— 用户反馈的「矩形过渡动画」。
-        let radius = island_radius(w, h, pc, pill, thickness);
-        let flare = island_flare(h, pc, pill);
-        let flare_h = lerp(8.0, FLARE_H, pc);
+        // 形状参数必须按「真正要画的那个矩形」算，不能按弹簧的高度算。
+        //
+        // body 常常比 h 高：它是常驻条与通知胶囊的**并集**（通知卡片高 44，
+        // 常驻条高 30）。而极小态（浏览器前台收成细线）时 h 只有 4.5。
+        // 两者一叠加，用 h 算出来的圆角就只有 2.25、外翻 1.35 —— 44 高的身体
+        // 被画成一块硬边矩形，正是用户反复截图反馈的那个样子。
+        // 现在一律取 body 自身的高度：身体多高，圆角就是它的半高。
+        let body_h = body.height().max(1.0);
+        let body_w = body.width().max(1.0);
+        let radius = island_radius(body_w, body_h, pc, pill, thickness);
+        let flare = island_flare(body_h, pc, pill);
+        let flare_h = lerp(8.0, FLARE_H, pc).min(body_h * 0.5);
+        // 形状自检：万一又出现「身体不矮、圆角却贴地」的组合，留一条现场日志
+        // （每秒最多一条，只写几何与开关，不含任何账号或内容），好离线定位。
+        if ((radius < 6.0 && body_h > 12.0) || body_h > h + 6.0) && self.t - self.shape_log_at > 1.0 {
+            self.shape_log_at = self.t;
+            use std::io::Write;
+            let dir = crate::model::config_dir().join("diagnostics");
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("shape.log")) {
+                let (bw, bh) = self.base_size();
+                let _ = writeln!(f, "t={:.2} body={:.1}x{:.1} radius={:.2} flare={:.2}/{:.1} w={:.1}->{:.1} h={:.1}->{:.1} base={:.1}x{:.1} minimal={} browser_min={} notice={} messenger={} dock={:?} shape={:?} skin={:?} ppp={:.2}",
+                    self.t, body.width(), body.height(), radius, flare, flare_h,
+                    self.w.pos, self.w.target, self.h.pos, self.h.target, bw, bh,
+                    self.effective_minimal(), self.browser_minimal_active,
+                    self.notice.is_some(), self.pending_messengers.len(),
+                    self.dock(), self.settings.island_shape, self.settings.skin, ctx.pixels_per_point());
+            }
+        }
         let thick = glass::thickness(PH);
         let glass_skin = self.settings.skin.is_glass();
         let layer = painter.layer_id();
