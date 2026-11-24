@@ -8398,6 +8398,8 @@ fn morph_expansion_frames_dump() {
     let mut h = H::new();
     h.app.settings.browser_minimal = false;
     h.app.settings.pet = false;
+    // 把常驻条撑到比面板宽：这是"展开中途变成宽板块"的前提条件。
+    h.quota_accounts(10);
     let outside = Pos2::new(WIN_W / 2.0, 200.0);
     for _ in 0..40 { h.cursor = Some(outside); h.frame(vec![]); }
     let inside = Pos2::new(WIN_W / 2.0, 12.0);

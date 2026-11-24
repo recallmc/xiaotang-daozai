@@ -90,6 +90,9 @@ const SWELL: (f32, f32) = (1.075, 1.13);
 // 不会出现「宽扁普通长方形」，常驻图标也有时间先淡出再被面板边缘切到。
 const OPEN_H: (f32, f32) = (190.0, 0.78);
 const OPEN_W: (f32, f32) = (130.0, 0.90);
+/// 常驻条比面板宽时的收窄：快而不过冲（临界阻尼），约 100 ms 收敛。
+/// 宽度先收进 PW、高度随后再长，过渡里就不会出现"条还是满宽、人已经长高"的宽板块。
+const NARROW_W: (f32, f32) = (430.0, 1.0);
 // 收起：临界阻尼，约 0.18 s 干净收回，无回弹。
 const CLOSE: (f32, f32) = (620.0, 1.0);
 const SWELL_K: (f32, f32) = (420.0, 0.8);
@@ -2711,11 +2714,20 @@ impl App {
             let intent=if self.effective_minimal() {MINIMAL_HOVER_INTENT}else{HOVER_INTENT};
             if !self.open && (self.drag_hot || t - since >= intent) {
                 self.open = true;
-                self.w.tune(OPEN_W.0, OPEN_W.1);
-                self.h.tune(OPEN_H.0, OPEN_H.1);
-                // 面板宽度固定 PW：常驻条比面板宽时是「收窄」，
-                // 高度弹簧更快，先把岛长高，宽度再慢慢收窄 ——
-                // 中间态始终高瘦，不会出现宽扁的普通长方形。
+                // 常驻条已经比面板宽时（组件挂得多），宽度必须和高度**同步收窄**。
+                // 以前不管多宽都用慢速 OPEN_W：条是 510、面板 419，
+                // 高度一路长到 100+ 而宽度还在 510 —— 中间就是一整块宽板块，
+                // 也就是用户反复截图的那个"矩形"。（原版岛只有 163 宽，永远碰不到。）
+                if bw > PW {
+                    // 先把宽度收进面板宽度（约 100 ms 收敛、临界阻尼不回弹），
+                    // 然后再长高 —— 于是过程是"长条先变成一个药丸，再长成面板"，
+                    // 和原版（岛只有 163 宽）观感一致，中间不会出现宽板块。
+                    self.w.tune(NARROW_W.0, NARROW_W.1);
+                    self.h.tune(OPEN_H.0, OPEN_H.1);
+                } else {
+                    self.w.tune(OPEN_W.0, OPEN_W.1);
+                    self.h.tune(OPEN_H.0, OPEN_H.1);
+                }
                 self.w.target = PW;
                 self.h.target = self.expanded_height();
                 // 从静止开始形变：宽度弹簧带着悬停胀大的初速直接冲出去时，
