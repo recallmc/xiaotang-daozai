@@ -1409,7 +1409,7 @@ pub(crate) const SETTINGS_TAB_SUBSCRIPTION: usize = 15;
 const SETTINGS_GROUPS: [(&str,usize,usize,&str);14] = [
     ("通用",0,0,"岛仔"), ("外观",SETTINGS_TAB_APPEARANCE,SETTINGS_TAB_APPEARANCE,""), ("位置",SETTINGS_TAB_POSITION,SETTINGS_TAB_POSITION,""), ("页面管理",10,10,""),
     ("音乐",1,1,"功能"), ("专注与健康",2,3,""), ("待办与置物",4,5,""), ("消息提醒",6,6,""), ("邮箱",7,7,""), ("日程",8,8,""), ("AI 额度",11,11,""), ("天气",12,12,""),
-    ("关于",9,9,""), ("订阅",SETTINGS_TAB_SUBSCRIPTION,SETTINGS_TAB_SUBSCRIPTION,""),
+    ("订阅",SETTINGS_TAB_SUBSCRIPTION,SETTINGS_TAB_SUBSCRIPTION,""), ("关于",9,9,""),
 ];
 /// 分页标题；合并页（3→2、5→4）显示合并后的名字。
 fn settings_tab_title(tab:usize)->&'static str{
@@ -1485,7 +1485,7 @@ impl App {
             let before=format!("{:?}",self.settings);
             egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(180.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,32),Color32::from_rgb(237,239,243))).stroke(egui::Stroke::NONE).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
                 ui.add_space(2.0);
-                // 13 项加两个分组标题：窗口拉到最矮时按可用高度压缩行高，「关于」始终留在底部可见。
+                // 14 项加两个分组标题：窗口拉到最矮时按可用高度压缩行高，「关于」始终留在底部可见。
                 // 每项占 行高 + 控件间距(3) + 行后空隙；两个分组标题和「关于」上方预留约 80。
                 let per=(ui.available_height()-80.0)/SETTINGS_GROUPS.len() as f32;
                 let row_h=(per-6.0).clamp(20.0,32.0);
@@ -2272,6 +2272,9 @@ impl App {
                             if close || modal.should_close() {self.calendar.form.open=false;}
                         }
                     }
+                    // 订阅页：上游重构设置页时把 13/14 给了外观/位置，订阅顺延到 15。
+                    // 少了这一支，选中「订阅」会掉进 `_` 分支显示「关于」的内容。
+                    SETTINGS_TAB_SUBSCRIPTION=>{self.subscription_settings(ui);}
                     _=>{
                         settings_label(ui,"岛仔 Daozai");
                         settings_card(ui,|ui|{

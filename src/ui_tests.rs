@@ -9246,34 +9246,66 @@ fn morph_expansion_frames_dump() {
     eprintln!("dumped {n} frames to {dir}");
 }
 
-/// 「岛一变长就出问题」的端到端护栏：
-/// 把常驻条撑到超过宽度上限，再悬停胀大，身体不能顶破 BODY_MAX，
-/// 否则两端圆角没有落脚空间、电量图标会被身体边缘平切。
-#[test]
-fn long_resident_bar_never_outgrows_the_body_cap() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut h = H::new();
-    h.app.settings.browser_minimal = false;
-    h.app.settings.pet = false;
-    h.quota_accounts(20);
-    for _ in 0..60 {
-        h.cursor = Some(Pos2::new(WIN_W / 2.0, 200.0));
-        h.frame(vec![]);
-    }
-    let layout_w = h.app.resident.target.width;
-    assert!(layout_w > crate::app::BODY_MAX, "测试前提：常驻条({layout_w})应长于身体上限({})", crate::app::BODY_MAX);
-    // 悬停胀大阶段
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 0.15);
-    let w = h.app.current_width();
-    assert!(w <= crate::app::BODY_MAX + 0.5, "常驻条变长后身体宽度顶破上限：{w} > {}", crate::app::BODY_MAX);
-    // 展开、收起全过程都不能超过上限
-    h.hover(Pos2::new(WIN_W / 2.0, 12.0), 1.2);
-    assert!(h.app.current_width() <= crate::app::BODY_MAX + 0.5, "展开中身体超上限");
-    h.hover(Pos2::new(WIN_W / 2.0, 260.0), 1.5);
-    assert!(h.app.current_width() <= crate::app::BODY_MAX + 0.5, "收起中身体超上限");
-}
-
 /// 设置页的 AI 额度账号默认收起成一行；需要检查明细的测试先把所有账号展开。
 pub(crate) fn open_quota_details(h:&H){
     for account in &h.app.quota.config.accounts {h.ctx.data_mut(|d|d.insert_temp(egui::Id::new(("quota-account-open",account.id.clone())),true));}
+}
+
+/// 临时诊断：把设置窗口按指定分页渲染成 PNG（仅当 DAOZAI_SETTINGS_DUMP=<目录> 时执行）。
+/// 用途：不依赖 GPU 截屏，直接看侧栏与分页内容到底长什么样。
+#[test]
+fn settings_window_frames_dump() {
+    let Ok(dir) = std::env::var("DAOZAI_SETTINGS_DUMP") else { return; };
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let size = Vec2::new(700.0, 600.0);
+    let ppp = 1.25;
+    for (tag, tab) in [("menu", 0usize), ("sub", crate::extras::SETTINGS_TAB_SUBSCRIPTION)] {
+        let mut h = H::new();
+        h.app.settings.settings_theme = crate::settings_theme::SettingsTheme::Light;
+        h.app.settings_tab = tab;
+        h.app.settings_open = true;
+        h.ctx.set_embed_viewports(false);
+        let output = std::sync::Arc::new(Mutex::new(None));
+        let capture = output.clone();
+        egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
+            let id = viewport.ids.this;
+            *capture.lock().unwrap() = Some(ctx.run(
+                egui::RawInput {
+                    viewport_id: id,
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                    viewports: std::iter::once((
+                        id,
+                        egui::ViewportInfo { native_pixels_per_point: Some(ppp), focused: Some(true), ..Default::default() },
+                    ))
+                    .collect(),
+                    ..Default::default()
+                },
+                |ctx| (viewport.viewport_ui_cb)(ctx),
+            ));
+        });
+        let mut raster = crate::preview_raster::Raster::new((size.x * ppp) as usize, (size.y * ppp) as usize);
+        for frame in 0..5 {
+            let root = h.ctx.run(Default::default(), |ctx| h.app.settings_ui(ctx, false));
+            raster.update_textures(&root.textures_delta);
+            let child = output.lock().unwrap().take().unwrap();
+            raster.update_textures(&child.textures_delta);
+            if frame == 4 {
+                raster.buf.fill([0.95, 0.95, 0.96, 1.0]);
+                raster.draw(&h.ctx.tessellate(child.shapes, child.pixels_per_point), child.pixels_per_point);
+                let mut rgba = Vec::new();
+                raster.to_rgba8(&mut rgba);
+                image::save_buffer(
+                    std::path::Path::new(&dir).join(format!("settings-{tag}.png")),
+                    &rgba,
+                    (size.x * ppp) as u32,
+                    (size.y * ppp) as u32,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+            raster.free_textures(&root.textures_delta);
+            raster.free_textures(&child.textures_delta);
+        }
+        eprintln!("dumped {tag}");
+    }
 }

@@ -49,15 +49,6 @@ pub const FLARE: f32 = 17.6; // 顶部外翻肩宽
 pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
 pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
-/// 岛体允许的最大宽度：窗口宽减去两端圆角的落脚空间。
-///
-/// 常驻条越挂越多时宽度会一路顶到上限。以前的上限 `WIN_W-32` 让身体几乎贴满窗口，
-/// 圆角没有落脚处、常驻内容也被缩放到正好等于身体宽度 —— 两者零余量，
-/// 电量图标再往外带 10px 就必然被身体边缘切掉，两端看上去就是直边。
-/// 用户反馈「岛长度一变长就开始出问题」就是这个。
-pub const BODY_MAX: f32 = WIN_W - 36.0;
-/// 常驻条内容的可用宽度：再比身体窄一圈，保证两端图标与圆角之间还有呼吸位。
-const CONTENT_MAX: f32 = BODY_MAX - 26.0;
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
 /// 胶囊皮肤与屏幕顶边的间隙。
@@ -99,181 +90,13 @@ const MINIMAL_HOVER_INTENT: f64 = 0.40;
 const LEAVE_DELAY: f64 = 0.12;
 const PAGE_EDGE_OVERLAP: f32 = 8.0;
 const SWELL: (f32, f32) = (1.075, 1.13);
-// 展开：高度先长到位、宽度随后收窄。
-// 高度用欠阻尼弹簧（末段约 2% 过冲），宽度用接近临界阻尼的慢弹簧 ——
-// 形变全程「先长高、再收窄」，中间态始终是高瘦的岛，
-// 不会出现「宽扁普通长方形」，常驻图标也有时间先淡出再被面板边缘切到。
-const OPEN_H: (f32, f32) = (190.0, 0.78);
-const OPEN_W: (f32, f32) = (130.0, 0.90);
-/// 常驻条比面板宽时的收窄：快而不过冲（临界阻尼），约 100 ms 收敛。
-/// 宽度先收进 PW、高度随后再长，过渡里就不会出现"条还是满宽、人已经长高"的宽板块。
-const NARROW_W: (f32, f32) = (430.0, 1.0);
+// 展开：欠阻尼，末段约 5% 过冲后回落；高度略软于宽度，像「垂落」下来。
+const OPEN_W: (f32, f32) = (330.0, 0.70);
+const OPEN_H: (f32, f32) = (290.0, 0.74);
 // 收起：临界阻尼，约 0.18 s 干净收回，无回弹。
 const CLOSE: (f32, f32) = (620.0, 1.0);
 const SWELL_K: (f32, f32) = (420.0, 0.8);
 const PAGE_SLIDE: f32 = 46.0;
-
-/// 岛体圆角：**只由高度决定，取尽可能大的半高**。
-///
-/// 药丸态就是胶囊（半高），长高过程中一直是圆润的岛，直到半高触到面板圆角
-/// `RAD` 才停住。刻意不再掺入展开进度 `pc`：那样任何一态都可能算出偏小的圆角，
-/// 一旦投影/取整，末端就会变成一条直边，看上去就是"一块矩形"
-/// （用户连续几轮反馈的问题）。现在只要身体有高度，圆角就必然是半高量级。
-fn island_radius(w: f32, h: f32, pc: f32, pill: bool, thickness: f32) -> f32 {
-    let _ = pc;
-    let half_h = (h * 0.5).max(0.0);
-    if pill {
-        (w.min(h) * 0.5).min(lerp(thickness * 0.5, 26.0, 1.0))
-    } else {
-        let k = (w / PW).clamp(0.3, 1.1);
-        half_h.min(RAD * k.min(1.0))
-    }
-}
-
-/// 顶部外翻肩宽：跟随高度，缩到很小的时候自然收敛，不会突然跳成 0。
-fn island_flare(h: f32, pc: f32, pill: bool) -> f32 {
-    if pill {
-        0.0
-    } else {
-        lerp(5.0, FLARE, pc.clamp(0.0, 1.0)).min((h * 0.5).max(0.0) * 0.6)
-    }
-}
-
-#[cfg(test)]
-mod island_shape_tests {
-    use super::*;
-
-    /// 任何形变阶段下，岛体都不能退化成长方形：
-    /// 圆角不得小于「半高（与面板圆角取小）」，也不得超过半高；外翻不得归零。
-    #[test]
-    fn island_never_collapses_into_a_rectangle() {
-        // 两条真实轨迹：① 常驻条 → 展开面板；② 常驻条 → 最小胶囊（浏览器置顶收起）。
-        let paths = [
-            ("展开", 543.0_f32, PW, BAR_H, PH),
-            ("收进最小胶囊", 543.0, 44.0, BAR_H, BAR_H_MIN),
-        ];
-        for (name, w0, w1, h0, h1) in paths {
-            // step 故意带上越界的负数与大于 1：收起途中高度会短时低于常驻高度。
-            for step in -2..=12 {
-                let pc = step as f32 / 10.0;
-                let t = pc.clamp(0.0, 1.0);
-                let (w, h) = (lerp(w0, w1, t), lerp(h0, h1, t));
-                let half = h * 0.5;
-                for &pill in &[false, true] {
-                    let r = island_radius(w, h, pc, pill, BAR_H);
-                    let f = island_flare(h, pc, pill);
-                    assert!(r <= half + 0.01, "[{name}] 圆角不能超过半高：w={w} h={h} pc={pc} r={r}");
-                    if pill {
-                        // 胶囊形态：圆角恒为半高（受厚度上限约束）。
-                        assert!(r >= half.min(BAR_H * 0.5) - 0.05, "[{name}] 胶囊圆角塌陷：h={h} r={r}");
-                    } else {
-                        assert!(
-                            r >= half.min(26.0) - 0.05,
-                            "[{name}] 圆角塌成直角（会变成矩形）：w={w} h={h} pc={pc} r={r}"
-                        );
-                        assert!(f >= 0.0, "[{name}] 外翻不能为负：h={h} pc={pc} f={f}");
-                        if h >= 12.0 {
-                            assert!(f > 0.4, "[{name}] 外翻突然归零（会变成矩形）：h={h} pc={pc} f={f}");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// 常驻内容永远不能溢出身体：岛体一变长（比常驻条窄、被上限截断），
-    /// 两端图标就会被身体边缘平直切掉 —— 用户从第一天就在反馈这件事。
-    #[test]
-    fn resident_content_never_overflows_the_body() {
-        let margin = 12.0;
-        for &layout_w in &[96.0_f32, 300.0, 510.0, 604.0, 760.0] {
-            for &body_w in &[44.0_f32, 120.0, 300.0, 419.0, 510.0, 604.0] {
-                let fit = if body_w >= layout_w {
-                    1.0
-                } else {
-                    ((body_w - 24.0) / layout_w).clamp(0.0, 1.0)
-                }.min(((BODY_MAX - 26.0) / layout_w).min(1.0));
-                // 布局自带 16 点内边距，图标在盒子里面；缩放后整体必须落在身体里，
-                // 两端还各留 margin 的余量。
-                let pad = 16.0;
-                let icon_left = fit * (layout_w * 0.5 - pad);
-                assert!(
-                    icon_left <= body_w * 0.5 - margin + 0.01,
-                    "内容溢出身体：layout={layout_w} body={body_w} fit={fit} icon_left={icon_left}"
-                );
-            }
-        }
-    }
-
-    /// 身体不矮，圆角就不能低于半高 —— 这条一旦破了，岛体就变成直角长方形。
-    ///
-    /// 经典失败组合：通知胶囊把身体撑到 44 高，而弹簧高度塌到 4.5（极小态）。
-    /// 以前圆角跟着弹簧高度算，得出 2.25，于是 44 高的身体画成硬边长方形。
-    #[test]
-    fn a_tall_body_is_never_drawn_with_a_squashed_corner() {
-        for &body_h in &[44.0_f32, 55.0, 120.0, 190.0] {
-            let raw = island_radius(510.0, body_h, 0.0, false, BAR_H);
-            let radius = if body_h >= 12.0 { raw.max((body_h * 0.5).min(26.0)) } else { raw };
-            let want = (body_h * 0.5).min(26.0);
-            assert!(
-                radius >= want - 0.01,
-                "身体 {body_h} 高却只有 {radius} 圆角（raw={raw}）—— 会画成直角长方形"
-            );
-        }
-    }
-
-    /// 常驻药丸必须是胶囊：圆角等于半高。
-    #[test]
-    fn resting_bar_is_a_capsule() {
-        let r = island_radius(543.0, BAR_H, 0.0, false, BAR_H);
-        assert!((r - BAR_H * 0.5).abs() < 0.01, "收起态应是胶囊，实际圆角 {r}");
-    }
-
-    /// 形状参数必须按「真正要画的那个矩形」算。
-    ///
-    /// 用户截图里的样子：奶色块 510×44（常驻条与通知胶囊的并集），
-    /// 但圆角只有 2.25、外翻 1.35 —— 因为当时用的是弹簧高度（极小态 4.5）。
-    /// 结果就是一块硬边矩形。这条测试锁死：只要身体是 44 高，圆角就必须是 22 量级。
-    #[test]
-    fn shape_follows_the_drawn_rect_not_the_spring_height() {
-        // 通知并集把身体撑到 44 高，而弹簧还在极小态。
-        for &drawn_h in &[BAR_H, 44.0, 120.0, PH] {
-            let r = island_radius(510.0, drawn_h, 0.0, false, BAR_H);
-            let f = island_flare(drawn_h, 0.0, false);
-            let half = drawn_h * 0.5;
-            let want = half.min(RAD);
-            assert!(
-                (r - want).abs() < 0.05,
-                "身体 {drawn_h} 高的圆角应是 {want}，实际 {r}"
-            );
-            assert!(f > 0.4, "身体 {drawn_h} 高的外翻不能归零，实际 {f}");
-        }
-        // 对照：如果还用极小态的高度算，就会得到 2.25 —— 那正是那个矩形的来源。
-        let wrong = island_radius(510.0, BAR_H_MIN, 0.0, false, BAR_H);
-        assert!(wrong < 3.0, "极小态圆角本来就该很小：{wrong}");
-    }
-
-    /// 常驻条再长，也不能把身体顶到窗口边缘。
-    ///
-    /// 这是「岛一变长就出问题」的回归护栏：宽度顶到上限后，
-    /// 必须还给两端圆角留出落脚空间，并且常驻内容要明显窄于身体，
-    /// 否则电量图标贴着身体边缘，会被平直切掉。
-    #[test]
-    fn wide_resident_bar_keeps_rounding_room_and_content_margin() {
-        let rest_radius = BAR_H * 0.5;
-        assert!(
-            BODY_MAX + rest_radius * 2.0 <= WIN_W,
-            "身体宽度没给两端圆角留空间：BODY_MAX={BODY_MAX} 圆角={rest_radius} 窗口={WIN_W}"
-        );
-        assert!(
-            CONTENT_MAX <= BODY_MAX - 24.0,
-            "常驻内容必须明显窄于身体，否则两端图标贴边被切：CONTENT_MAX={CONTENT_MAX} BODY_MAX={BODY_MAX}"
-        );
-        // 内容居中后，两端各留出的余量要够容纳图标外沿。
-        let margin = (BODY_MAX - CONTENT_MAX) * 0.5;
-        assert!(margin >= 12.0, "两端余量太小：{margin}");
-    }
-}
 
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
@@ -996,8 +819,6 @@ pub struct App {
     pub displays:Vec<crate::display_layout::Display>,
     browser_at_top:bool,
     browser_minimal_active:bool,
-    /// 形状自检日志的节流时间戳（每 1 秒最多一条）。
-    shape_log_at:f64,
     /// 毛玻璃着色量（平滑过渡，避免背景变化时闪烁）；0 表示尚未初始化。
     glass_tint:f32,
     pub(crate) fluid:crate::fluid::Fluid,
@@ -1177,7 +998,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, shape_log_at:0.0, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
@@ -1984,29 +1805,8 @@ impl App {
         } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
             (BAR_W_MIN, BAR_H_MIN)
         } else {
-            (self.resident.target.width.min(BODY_MAX), BAR_H)
+            (self.resident.target.width.min(WIN_W-32.0), BAR_H)
         }
-    }
-
-    /// 常驻内容的缩放系数：**必须同时受内容上限和身体实际宽度约束**。
-    ///
-    /// 以前只看 `CONTENT_MAX`（固定 578），完全没考虑身体有多宽：
-    /// 岛体一旦比常驻条窄（条被上限截断、收起动画中、或宽度弹簧滞后），
-    /// 内容就溢出身体，两端图标被身体边缘**平直切掉一半** —— 这正是
-    /// 用户从第一天就在说的「岛长度一变长就出问题」。
-    /// 现在按 `身体宽度 / 常驻条宽度` 缩放，任何长度下两端都不会被切。
-    pub(crate) fn resident_fit(&self) -> f32 {
-        let layout_w = self.resident.target.width.max(1.0);
-        let body_w = self.w.pos.max(1.0);
-        // 身体不比常驻条窄时不动内容（保持现在的观感）；
-        // 一旦身体窄过常驻条（条变长被上限截断、收起动画中、宽度弹簧滞后），
-        // 内容整体缩到身体里并留出两端 12 点余量 —— 任何长度下两端图标都不会被切。
-        let by_body = if body_w >= layout_w {
-            1.0
-        } else {
-            ((body_w - 24.0) / layout_w).clamp(0.0, 1.0)
-        };
-        by_body.min((CONTENT_MAX / layout_w).min(1.0))
     }
 
     /// 0 = 药丸，1 = 完整面板（展开时可略超过 1）。
@@ -2225,10 +2025,7 @@ impl App {
         let (sx, sy) = self.drag_scale();
         // 拿起放大不能超出透明画布，否则两端会被切掉。
         let (max_w, max_h) = if side {(crate::side_dock::SIDE_W, crate::side_dock::SIDE_H)} else {(WIN_W, WIN_H)};
-        // 岛体必须完整落在画布可见区内。
-        // 旧写法 `.min((max_w - 24).max(self.w.pos))` 里那个 `.max(self.w.pos)`
-        // 把钳制变成了空操作，宽度顶到上限时两端圆角直接被窗口边缘切掉。
-        let (w, h) = ((self.w.pos * sx).min(max_w - 16.0), (self.h.pos * sy).min(max_h - 16.0));
+        let (w, h) = ((self.w.pos * sx).min((max_w - 24.0).max(self.w.pos)), (self.h.pos * sy).min((max_h - 24.0).max(self.h.pos)));
         let panel = self.island_rect(win, w, h);
         let messenger_rect=self.messenger_badge_rect(win,panel);
         let appear=self.messenger_appear();
@@ -2242,48 +2039,11 @@ impl App {
         let body=notice_shape.map_or(body,|notice|body.union(notice));
         let minimal_strip = self.effective_minimal() && !self.island_lyrics_active() && self.notice.is_none() && self.t>=self.notification_bell_until;
         let minimal_pill = minimal_strip && pc < 0.02;
+        let flare = if minimal_pill || pill { 0.0 } else { lerp(5.0, FLARE, pc) };
+        let k = (w / PW).clamp(0.3, 1.1);
         let thickness = if side { crate::side_dock::SIDE_BAR_W } else { BAR_H };
-        // 圆角与外翻都跟着高度走：药丸态是胶囊，过渡中始终是圆润的岛，
-        // 完全展开的面板才收敛到面板圆角。
-        // 以前最小胶囊（浏览器置顶收起）时圆角会瞬间掉到 2px、外翻直接归零，
-        // 岛体在收窄途中变成硬邦邦的长方形 —— 用户反馈的「矩形过渡动画」。
-        // 形状参数必须按「真正要画的那个矩形」算，不能按弹簧的高度算。
-        //
-        // body 常常比 h 高：它是常驻条与通知胶囊的**并集**（通知卡片高 44，
-        // 常驻条高 30）。而极小态（浏览器前台收成细线）时 h 只有 4.5。
-        // 两者一叠加，用 h 算出来的圆角就只有 2.25、外翻 1.35 —— 44 高的身体
-        // 被画成一块硬边矩形，正是用户反复截图反馈的那个样子。
-        // 现在一律取 body 自身的高度：身体多高，圆角就是它的半高。
-        let body_h = body.height().max(1.0);
-        let body_w = body.width().max(1.0);
-        // 圆角兜底：**身体不矮，圆角就不能低于半高**。
-        // 这是"矩形"唯一的成因 —— 身体还是那么高，但圆角算成了 0，
-        // 于是画出一块直角长方形（用户反复截图反馈的那个）。
-        // 以前圆角跟着弹簧高度算：通知胶囊把身体撑到 44 高、而弹簧高度塌到 4.5 时，
-        // 圆角就是 2.25、外翻 1.35 —— 44 高的身体被画成硬边长方形。
-        // 现在按实际绘制矩形算，并再加一道下限：任何状态下都不可能画成直角。
-        let raw_radius = island_radius(body_w, body_h, pc, pill, thickness);
-        let radius = if body_h >= 12.0 { raw_radius.max((body_h * 0.5).min(26.0)) } else { raw_radius };
-        let raw_flare = island_flare(body_h, pc, pill);
-        let flare = if body_h >= 12.0 { raw_flare.max(3.0) } else { raw_flare };
-        let flare_h = lerp(8.0, FLARE_H, pc).min(body_h * 0.5);
-        // 形状自检：万一又出现「身体不矮、圆角却贴地」的组合，留一条现场日志
-        // （每秒最多一条，只写几何与开关，不含任何账号或内容），好离线定位。
-        if ((raw_radius < 6.0 && body_h >= 12.0) || body_h > h + 6.0) && self.t - self.shape_log_at > 1.0 {
-            self.shape_log_at = self.t;
-            use std::io::Write;
-            let dir = crate::model::config_dir().join("diagnostics");
-            let _ = std::fs::create_dir_all(&dir);
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("shape.log")) {
-                let (bw, bh) = self.base_size();
-                let _ = writeln!(f, "t={:.2} body={:.1}x{:.1} raw_radius={:.2} radius={:.2} flare={:.2}/{:.1} w={:.1}->{:.1} h={:.1}->{:.1} base={:.1}x{:.1} minimal={} browser_min={} notice={} messenger={} dock={:?} shape={:?} skin={:?} ppp={:.2}",
-                    self.t, body.width(), body.height(), raw_radius, radius, flare, flare_h,
-                    self.w.pos, self.w.target, self.h.pos, self.h.target, bw, bh,
-                    self.effective_minimal(), self.browser_minimal_active,
-                    self.notice.is_some(), self.pending_messengers.len(),
-                    self.dock(), self.settings.island_shape, self.settings.skin, ctx.pixels_per_point());
-            }
-        }
+        let radius = if minimal_pill { BAR_H_MIN / 2.0 } else if pill { (w.min(h) * 0.5).min(lerp(thickness * 0.5, 26.0, pc)) } else { lerp(12.5, RAD * k.min(1.0), pc) };
+        let flare_h = lerp(8.0, FLARE_H, pc);
         let thick = glass::thickness(PH);
         let glass_skin = self.settings.skin.is_glass();
         let layer = painter.layer_id();
@@ -2322,16 +2082,8 @@ impl App {
         let center_guide=self.paint_center_rim(&painter, body, panel, flare, flare_h, radius, env.screen);
         let content_from=crate::skin_paint::shape_count(&ctx,layer);
 
-        // 内容只随形体「揭开」：不缩放，按面板裁剪。
-        // 用高度进度（progress）而不是宽度：悬停时药丸会轻微胀大，
-        // 宽度在收起阶段也会变化，拿宽度当进度会误判成「已展开」。
-        //
-        // 必须早于常驻内容淡完就开始浮现（两者交叠「换班」）：
-        // 以前要等到 0.44 才起、0.88 才满，常驻内容早在 0.66 就淡完，
-        // 中间那一段身体已经长成一大片奶色、里面空空如也 ——
-        // 用户看到的就是「一块矩形」。
-        // 面板内容在常驻内容退场之后才浮现，避免两层内容叠字。
-        let reveal = smoothstep(0.14, 0.34, p);
+        // 内容只随形体「揭开」：不缩放，按面板裁剪，到 55% 才开始淡入
+        let reveal = if self.open { smoothstep(0.50, 0.97, p) } else { smoothstep(0.55, 0.92, p) };
         self.reveal = reveal;
         let origin = self.content_origin(win);
         let clip = panel.intersect(win);
@@ -2404,7 +2156,7 @@ impl App {
         if pet_alpha>0.004 && !minimal_pill {
             let y=(h.min(self.base_size().1)-BAR_H).max(0.0)/2.0;
             // 吉祥物跟随皮肤换色：浅色底上变成深色版本，保持清晰。
-            let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{self.resident_fit()};
+            let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{((WIN_W-32.0)/self.resident.target.width).min(1.0)};
             self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,self.skin_palette());
         }
         let previous_scroll=self.content_scroll.take();
@@ -2580,10 +2332,8 @@ impl App {
             let bar=Rect::from_min_size(Pos2::new(cx-(bw+12.0)/2.0,top),Vec2::new(bw+12.0,bh+4.0));
             panel.union(bar)
         } else {
-            // 收起态：命中区跟着实际宽度走（悬停时药丸会轻微胀大），
-            // 这样光标停在胀大后的边缘也仍能唤出岛。
             let (bw,bh)=self.base_size();
-            let (hit_w,hit_h)=(bw.max(self.w.pos)+12.0,bh+4.0);
+            let (hit_w,hit_h)=(bw+12.0,bh+4.0);
             Rect::from_min_size(Pos2::new(cx-hit_w/2.0,top),Vec2::new(hit_w,hit_h))
         }
     }
@@ -3087,41 +2837,21 @@ impl App {
             let intent=if self.effective_minimal() {MINIMAL_HOVER_INTENT}else{HOVER_INTENT};
             if !self.open && (self.drag_hot || t - since >= intent) {
                 self.open = true;
-                // 常驻条已经比面板宽时（组件挂得多），宽度必须和高度**同步收窄**。
-                // 以前不管多宽都用慢速 OPEN_W：条是 510、面板 419，
-                // 高度一路长到 100+ 而宽度还在 510 —— 中间就是一整块宽板块，
-                // 也就是用户反复截图的那个"矩形"。（原版岛只有 163 宽，永远碰不到。）
-                if bw > PW {
-                    // 先把宽度收进面板宽度（约 100 ms 收敛、临界阻尼不回弹），
-                    // 然后再长高 —— 于是过程是"长条先变成一个药丸，再长成面板"，
-                    // 和原版（岛只有 163 宽）观感一致，中间不会出现宽板块。
-                    self.w.tune(NARROW_W.0, NARROW_W.1);
-                    self.h.tune(OPEN_H.0, OPEN_H.1);
-                } else {
-                    self.w.tune(OPEN_W.0, OPEN_W.1);
-                    self.h.tune(OPEN_H.0, OPEN_H.1);
-                }
+                self.w.tune(OPEN_W.0, OPEN_W.1);
+                self.h.tune(OPEN_H.0, OPEN_H.1);
                 self.w.target = PW;
                 self.h.target = self.expanded_height();
-                // 从静止开始形变：宽度弹簧带着悬停胀大的初速直接冲出去时，
-                // 会先掉一大截宽度、再慢慢收窄，中间态就是一个宽扁的长方形。
-                // 清零后高度先行、宽度缓行，过渡全程是高瘦的岛。
-                self.w.vel = 0.0;
-                self.h.vel = 0.0;
                 if self.drag_hot {
                     // 拖入不等缓冲，直接给一点初速度，30 ms 内就能看到形变
-                    self.w.vel = self.w.vel.max(300.0);
-                    self.h.vel = self.h.vel.max(320.0);
+                    self.w.vel = self.w.vel.max(600.0);
+                    self.h.vel = self.h.vel.max(260.0);
                 }
             } else if !self.open {
                 self.w.tune(SWELL_K.0, SWELL_K.1);
                 self.h.tune(SWELL_K.0, SWELL_K.1);
                 // 悬停时轻微胀大：厚度方向胀得多一点（侧边停靠时厚度是宽度）。
                 let (sw,sh)=if self.side(){(SWELL.1,SWELL.0)}else{SWELL};
-                // 常驻条比面板窄时，胀大量不越过面板宽度，免得岛比展开后还宽。
-                // 胀大也不能顶破 BODY_MAX：常驻条已经贴在上限时不再横向胀，
-                // 否则身体被窗口边缘切掉、两端圆角消失。
-                self.w.target = if bw<PW {(bw*sw).min(PW)} else {(bw*sw).min(BODY_MAX)};
+                self.w.target = bw * sw;
                 self.h.target = bh * sh;
             }
         } else {
@@ -3167,8 +2897,7 @@ impl App {
     // ---------------------------------------------------------------
     fn shared_header(&mut self, base: &Card, cx: f32, p: f32, reveal: f32, env: &Env) {
         let local_cx = cx - base.origin.x;
-        // 内容按身体宽度缩放：常驻条再长、岛体再窄，两端图标都不会被身体边缘平切。
-        let fit=self.resident_fit();
+        let fit=((WIN_W-32.0)/self.resident.target.width).min(1.0);
         let fitted=base.scaled(local_cx,15.0,lerp(fit,1.0,p));
         let base=&fitted;
         let lyric=self.island_lyric().map(|(index,_)|index);
@@ -3208,7 +2937,7 @@ impl App {
         let header=base.faded(1.0-lyric_alpha);
         let base=&header;
         // 电池、时钟从药丸位置飞到面板顶栏。
-        let m = anim::ease_in_out(smoothstep(0.0, 0.72, p));
+        let m = anim::ease_in_out(smoothstep(0.0, 0.85, p));
         let clock = self.settings.clock_text(&env.clock);
         let show_battery=self.settings.show_battery && env.battery.is_some();
 
@@ -3226,13 +2955,6 @@ impl App {
         // 药丸起点布局
         let has_music=self.media.is_music();
         let layout=self.resident.current();
-        // 「装得下」系数：岛体宽度不够时，常驻条两端（电量、订阅等）会被
-        // 面板边缘平直切掉一半（用户反馈的「电量图标边缘被裁剪」）。
-        // 岛体一旦窄过常驻条，两端内容先淡出，绝不带着半截图标硬切。
-        let (bw,_) = self.base_size();
-        // 「装得下」系数只在收起方向生效：岛体收窄时两端图标会被面板边缘平切，
-        // 先淡出再收；展开方向交给高度进度换班，否则常驻内容过早消失、身体变空。
-        let fits = if self.open { 1.0 } else { ((self.w.pos - (bw - 30.0)) / 30.0).clamp(0.0, 1.0) };
         let pb=(local_cx+layout.x[bar::BATTERY].unwrap_or(0.0),15.0);
         let pcx=layout.x[bar::CLOCK].map_or(hc,|x|local_cx+x-paint::clock_width(base,&clock,size::PILL_CLOCK)/2.0);
 
@@ -3240,11 +2962,11 @@ impl App {
         // 电池：位置/大小连续插值
         let bk = lerp(1.0, 0.8, m);
         let bpos = (lerp(pb.0, hb.0, m), lerp(pb.1, hb.1, m));
-        if show_battery {paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY)*fits,1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk);}
+        if show_battery {paint::battery(&base.faded(lerp(layout.clearance(bar::BATTERY),1.0,m)), bpos.0, bpos.1, env.battery, env.charging, bk);}
 
         // 时钟：两个字号沿同一路径交叉淡化，避免逐帧换字号
         let cpos = (lerp(pcx, hc, m), lerp(21.0, 23.0, m));
-        let a_pill = (1.0 - smoothstep(0.25, 0.6, m)) * layout.clearance(bar::CLOCK) * fits;
+        let a_pill = (1.0 - smoothstep(0.25, 0.6, m)) * layout.clearance(bar::CLOCK);
         let a_head = smoothstep(0.35, 0.75, m);
         if a_pill > 0.0 {
             paint::clock(&base.faded(a_pill),cpos.0,cpos.1,&clock,size::PILL_CLOCK);
@@ -3254,9 +2976,7 @@ impl App {
         }
         // 日期随内容淡入，从药丸方向轻轻滑出
         if reveal > 0.0 {
-            // 日期等时钟「飞」到位后再显现：时钟从药丸位置飞向顶栏时会横穿日期所在处，
-            // 日期先出现就会和飞行中的时钟叠字（用户截图里「上午 10:4」压着「24日 周二」）。
-            base.faded(reveal * smoothstep(0.55, 1.0, m)).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
+            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
         }
         if self.open && reveal>0.95 && p>0.98 && !self.is_editing() && !self.drag_hot {
             if let Some(screen)=env.screen {
@@ -3292,17 +3012,13 @@ impl App {
         if has_music && (p>0.1 || layout.x[bar::MUSIC].is_some()) {
             let x=lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m);
             let y=lerp(15.0,18.0,m);
-            paint::playback_bars(&base.faded(lerp(fits,1.0,m)),x,y,self.t,self.media.playing,theme::WHITE);
+            paint::playback_bars(base,x,y,self.t,self.media.playing,theme::WHITE);
             if self.open && reveal>0.6 && base.hit(x-13.0,y-14.0,26.0,28.0,"header-music")
                 .on_hover_text(if self.settings.visible_pages[0]{"返回音乐播放页"}else{"打开音乐设置"})
                 .on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){self.show_page(0);}
         }
-        // 常驻组件（额度环、天气、订阅流量）必须**先退场**，面板内容再登场，
-        // 两者不能同时在画面上：否则额度环、天气、订阅会和面板标题叠在一起，
-        // 看起来就是「图标跑哪去了」（用户截图里那一片重叠的残影）。
-        // 以前两者都落在 0.12~0.42/0.50 这个窗口里，等于同时显示。
-        // 现在：常驻 0.02~0.14 退干净，面板内容 0.14~0.34 浮现，交接处几乎不重叠。
-        let compact_alpha=(1.0-smoothstep(0.02,0.14,p))*fits;
+        let compact_alpha=1.0-smoothstep(0.0,0.22,p);
+
         if self.t<self.notification_bell_until&&!self.compact_notices()&&p<0.1 {
             if let Some(x)=layout.x[bar::BELL]{
                 let x=local_cx+x;paint::bell(&base.scaled(x,14.0,1.2),x,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at));
