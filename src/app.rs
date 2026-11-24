@@ -2146,7 +2146,8 @@ impl App {
         // 以前要等到 0.44 才起、0.88 才满，常驻内容早在 0.66 就淡完，
         // 中间那一段身体已经长成一大片奶色、里面空空如也 ——
         // 用户看到的就是「一块矩形」。
-        let reveal = smoothstep(0.12, 0.50, p);
+        // 面板内容在常驻内容退场之后才浮现，避免两层内容叠字。
+        let reveal = smoothstep(0.14, 0.34, p);
         self.reveal = reveal;
         let origin = self.content_origin(win);
         let clip = panel.intersect(win);
@@ -2875,7 +2876,7 @@ impl App {
         let header=base.faded(1.0-lyric_alpha);
         let base=&header;
         // 电池、时钟从药丸位置飞到面板顶栏。
-        let m = anim::ease_in_out(smoothstep(0.0, 0.85, p));
+        let m = anim::ease_in_out(smoothstep(0.0, 0.72, p));
         let clock = self.settings.clock_text(&env.clock);
         let show_battery=self.settings.show_battery && env.battery.is_some();
 
@@ -2921,7 +2922,9 @@ impl App {
         }
         // 日期随内容淡入，从药丸方向轻轻滑出
         if reveal > 0.0 {
-            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
+            // 日期等时钟「飞」到位后再显现：时钟从药丸位置飞向顶栏时会横穿日期所在处，
+            // 日期先出现就会和飞行中的时钟叠字（用户截图里「上午 10:4」压着「24日 周二」）。
+            base.faded(reveal * smoothstep(0.55, 1.0, m)).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
         }
         if self.open && reveal>0.95 && p>0.98 && !self.is_editing() && !self.drag_hot {
             if let Some(screen)=env.screen {
@@ -2962,11 +2965,12 @@ impl App {
                 .on_hover_text(if self.settings.visible_pages[0]{"返回音乐播放页"}else{"打开音乐设置"})
                 .on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){self.show_page(0);}
         }
-        // 常驻组件（额度环、天气、订阅流量）随面板长高淡出，并与面板内容「交叠换班」：
-        // 淡出在 0.12~0.42 完成，面板内容 0.12~0.50 浮现，中间不留空白身体。
-        // 「装得下」系数只在收起方向生效：展开时宽度收窄是正常形变，
-        // 那时该由高度进度负责换班，否则常驻内容会过早消失、身体变空。
-        let compact_alpha=(1.0-smoothstep(0.12,0.42,p))*fits;
+        // 常驻组件（额度环、天气、订阅流量）必须**先退场**，面板内容再登场，
+        // 两者不能同时在画面上：否则额度环、天气、订阅会和面板标题叠在一起，
+        // 看起来就是「图标跑哪去了」（用户截图里那一片重叠的残影）。
+        // 以前两者都落在 0.12~0.42/0.50 这个窗口里，等于同时显示。
+        // 现在：常驻 0.02~0.14 退干净，面板内容 0.14~0.34 浮现，交接处几乎不重叠。
+        let compact_alpha=(1.0-smoothstep(0.02,0.14,p))*fits;
         if self.t<self.notification_bell_until&&!self.compact_notices()&&p<0.1 {
             if let Some(x)=layout.x[bar::BELL]{
                 let x=local_cx+x;paint::bell(&base.scaled(x,14.0,1.2),x,14.0,theme::WHITE,paint::bell_swing(self.t-self.notification_bell_at));
