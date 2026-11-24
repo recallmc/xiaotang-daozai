@@ -190,6 +190,23 @@ mod island_shape_tests {
         }
     }
 
+    /// 身体不矮，圆角就不能低于半高 —— 这条一旦破了，岛体就变成直角长方形。
+    ///
+    /// 经典失败组合：通知胶囊把身体撑到 44 高，而弹簧高度塌到 4.5（极小态）。
+    /// 以前圆角跟着弹簧高度算，得出 2.25，于是 44 高的身体画成硬边长方形。
+    #[test]
+    fn a_tall_body_is_never_drawn_with_a_squashed_corner() {
+        for &body_h in &[44.0_f32, 55.0, 120.0, 190.0] {
+            let raw = island_radius(510.0, body_h, 0.0, false, BAR_H);
+            let radius = if body_h >= 12.0 { raw.max((body_h * 0.5).min(26.0)) } else { raw };
+            let want = (body_h * 0.5).min(26.0);
+            assert!(
+                radius >= want - 0.01,
+                "身体 {body_h} 高却只有 {radius} 圆角（raw={raw}）—— 会画成直角长方形"
+            );
+        }
+    }
+
     /// 常驻药丸必须是胶囊：圆角等于半高。
     #[test]
     fn resting_bar_is_a_capsule() {
@@ -2081,20 +2098,28 @@ impl App {
         // 现在一律取 body 自身的高度：身体多高，圆角就是它的半高。
         let body_h = body.height().max(1.0);
         let body_w = body.width().max(1.0);
-        let radius = island_radius(body_w, body_h, pc, pill, thickness);
-        let flare = island_flare(body_h, pc, pill);
+        // 圆角兜底：**身体不矮，圆角就不能低于半高**。
+        // 这是"矩形"唯一的成因 —— 身体还是那么高，但圆角算成了 0，
+        // 于是画出一块直角长方形（用户反复截图反馈的那个）。
+        // 以前圆角跟着弹簧高度算：通知胶囊把身体撑到 44 高、而弹簧高度塌到 4.5 时，
+        // 圆角就是 2.25、外翻 1.35 —— 44 高的身体被画成硬边长方形。
+        // 现在按实际绘制矩形算，并再加一道下限：任何状态下都不可能画成直角。
+        let raw_radius = island_radius(body_w, body_h, pc, pill, thickness);
+        let radius = if body_h >= 12.0 { raw_radius.max((body_h * 0.5).min(26.0)) } else { raw_radius };
+        let raw_flare = island_flare(body_h, pc, pill);
+        let flare = if body_h >= 12.0 { raw_flare.max(3.0) } else { raw_flare };
         let flare_h = lerp(8.0, FLARE_H, pc).min(body_h * 0.5);
         // 形状自检：万一又出现「身体不矮、圆角却贴地」的组合，留一条现场日志
         // （每秒最多一条，只写几何与开关，不含任何账号或内容），好离线定位。
-        if ((radius < 6.0 && body_h > 12.0) || body_h > h + 6.0) && self.t - self.shape_log_at > 1.0 {
+        if ((raw_radius < 6.0 && body_h >= 12.0) || body_h > h + 6.0) && self.t - self.shape_log_at > 1.0 {
             self.shape_log_at = self.t;
             use std::io::Write;
             let dir = crate::model::config_dir().join("diagnostics");
             let _ = std::fs::create_dir_all(&dir);
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("shape.log")) {
                 let (bw, bh) = self.base_size();
-                let _ = writeln!(f, "t={:.2} body={:.1}x{:.1} radius={:.2} flare={:.2}/{:.1} w={:.1}->{:.1} h={:.1}->{:.1} base={:.1}x{:.1} minimal={} browser_min={} notice={} messenger={} dock={:?} shape={:?} skin={:?} ppp={:.2}",
-                    self.t, body.width(), body.height(), radius, flare, flare_h,
+                let _ = writeln!(f, "t={:.2} body={:.1}x{:.1} raw_radius={:.2} radius={:.2} flare={:.2}/{:.1} w={:.1}->{:.1} h={:.1}->{:.1} base={:.1}x{:.1} minimal={} browser_min={} notice={} messenger={} dock={:?} shape={:?} skin={:?} ppp={:.2}",
+                    self.t, body.width(), body.height(), raw_radius, radius, flare, flare_h,
                     self.w.pos, self.w.target, self.h.pos, self.h.target, bw, bh,
                     self.effective_minimal(), self.browser_minimal_active,
                     self.notice.is_some(), self.pending_messengers.len(),
