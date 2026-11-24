@@ -8742,7 +8742,7 @@ fn weather_icon_atlas_preview(){
     for (name,palette,ppp) in [("weather-icons-dark",None,2.0f32),("weather-icons-cream",Some(crate::skin_paint::CREAM),2.0),("weather-icons-glass-light",Some(crate::skin_paint::GLASS_LIGHT),2.0),("weather-icons-dark-1x",None,1.0),("weather-icons-dark-125",None,1.25),("weather-icons-dark-150",None,1.5)] {
         let (pw,ph)=((924.0*ppp) as usize,(700.0*ppp) as usize);
         let mut h=H::new();h.app.settings.pet=false;
-        let mut layout=crate::bar_layout::Layout::new(false,0,false,false,false,false,true);layout.widths[crate::bar_layout::WEATHER]=50.0;
+        let mut layout=crate::bar_layout::Layout::new(false,0,false,false,false,false,true,false);layout.widths[crate::bar_layout::WEATHER]=50.0;
         let mut raster=crate::preview_raster::Raster::new(pw,ph);
         for frame in 0..4 {
             let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(924.0,700.0))),time:Some(frame as f64),

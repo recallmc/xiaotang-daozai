@@ -1889,10 +1889,11 @@ impl App {
         self.resident_power=(env.battery,env.charging);
         let quota_count=self.quota_bar_indices().len();
         let sub_count=self.subscription_bar_count();
-        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),quota_count+sub_count,self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled(),self.weather_pill().is_some());
+        // 订阅徽标是**独立槽位**（不算额度环）：额度组仍按环数排布，不会被它撑开间距。
+        let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),quota_count,self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled(),self.weather_pill().is_some(),sub_count>0);
         layout.reorder(&self.settings.resident_order);
         for (position,extra) in self.quota_balance_layout(&ctx){layout.balance_tail(position,extra);}
-        if sub_count>0 {let extra=self.subscription_bar_extra(&ctx);layout.widen(crate::bar_layout::quota_slot(quota_count),extra);}
+        if sub_count>0 {let extra=self.subscription_bar_extra(&ctx);layout.widen(crate::bar_layout::SUBSCRIPTION,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
         if self.settings.clock_seconds { layout.widen_clock(24.0); }
         if let Some(extra)=self.weather_pill_extra(&ctx){ layout.widen(bar::WEATHER,extra); }
@@ -3029,8 +3030,7 @@ impl App {
         if compact_alpha>0.004 {
             let c=base.faded(compact_alpha);let c=if compact_alpha<0.8{c.ghost()}else{c};
             self.draw_quota_bar(&c,local_cx,&layout);
-            let quota_count=self.quota_bar_indices().len();
-            if self.subscription_bar_count()>0 {self.draw_subscription_bar(&c,local_cx,&layout,quota_count);}
+            if self.subscription_bar_count()>0 {self.draw_subscription_bar(&c,local_cx,&layout);}
             if let Some(x)=layout.x[bar::WEATHER] { self.draw_pill_weather(&c,local_cx+x,&layout); }
         }
         if self.pomo.running && compact_alpha>0.004 {

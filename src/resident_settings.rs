@@ -2,7 +2,7 @@ use crate::{bar_layout::*,paint::{self,Card,H},theme::{self,W}};
 use eframe::egui::{self,Color32,RichText,Rect,Pos2,Vec2};
 
 pub(crate) fn preview_layout(order:&[usize],quotas:usize)->Layout {
-    let mut layout=Layout::new(true,quotas.max(1),true,true,false,true,true);
+    let mut layout=Layout::new(true,quotas.max(1),true,true,false,true,true,false);
     layout.reorder(order);layout
 }
 

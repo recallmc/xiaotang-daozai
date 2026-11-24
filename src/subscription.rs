@@ -377,27 +377,29 @@ impl App {
         if !self.settings.visible_pages[SUBSCRIPTION_PAGE] || self.settings.minimal || self.subscriptions.items.is_empty() { 0 } else { 1 }
     }
 
+    /// 订阅徽标超出手册最小宽度（图标 24 + 间距 3）的部分：只有百分比文字比它长时才需要补。
     pub(crate) fn subscription_bar_extra(&self, ctx: &egui::Context) -> f32 {
         let text = self.subscriptions.items.iter().find(|item| item.id == self.subscriptions.selected)
             .and_then(|item| item.percent()).map(percent_text).unwrap_or_else(|| "--".into());
-        ctx.fonts(|fonts| fonts.layout_no_wrap(text, theme::font(theme::size::PILL_CLOCK, W::Bold), theme::WHITE).size().x).ceil() + 6.0
+        let text_w = ctx.fonts(|fonts| fonts.layout_no_wrap(text, theme::font(theme::size::PILL_CLOCK, W::Bold), theme::WHITE).size().x).ceil();
+        (SUB_ICON + SUB_GAP + text_w + SUB_PAD - crate::bar_layout::SUBSCRIPTION_WIDTH).max(0.0)
     }
 
-    pub(crate) fn draw_subscription_bar(&mut self, c: &Card, cx: f32, layout: &crate::bar_layout::Layout, position: usize) {
+    pub(crate) fn draw_subscription_bar(&mut self, c: &Card, cx: f32, layout: &crate::bar_layout::Layout) {
         let Some(item) = self.subscriptions.items.iter().find(|item| item.id == self.subscriptions.selected).cloned() else { return; };
-        let slot = crate::bar_layout::quota_slot(position);
+        let slot = crate::bar_layout::SUBSCRIPTION;
         let Some(offset) = layout.x.get(slot).copied().flatten() else { return; };
+        let width = layout.widths.get(slot).copied().unwrap_or(crate::bar_layout::SUBSCRIPTION_WIDTH);
         let alpha = layout.pet_clearance(slot);
         let faded = c.faded(alpha);
         let c = if alpha < 0.8 { &faded.ghost() } else { &faded };
-        let x = cx + offset;
-        let extra = (layout.widths[slot] - 27.0).max(0.0);
-        let icon_x = x - extra / 2.0;
-        subscription_icon_card(c, icon_x - 12.0, 3.0, 24.0);
+        // 槽位内部从左边排：图标 → 间距 → 百分比，右边留一点内边距。
+        let left = cx + offset - width / 2.0;
+        subscription_icon_card(c, left, 3.0, SUB_ICON);
         let text = item.percent().map(percent_text).unwrap_or_else(|| "--".into());
-        c.text(icon_x + 15.0, 21.0, &text, theme::size::PILL_CLOCK, W::Bold, theme::WHITE, H::Left);
+        c.text(left + SUB_ICON + SUB_GAP, 21.0, &text, theme::size::PILL_CLOCK, W::Bold, theme::WHITE, H::Left);
         let summary = if item.total > 0 { format!("{} · {}\n{} / {}", item.name, text, bytes(item.used()), bytes(item.total)) } else { format!("{}\n尚未获取流量信息", item.name) };
-        if c.hit(x - (27.0 + extra) / 2.0, 1.0, 27.0 + extra, 28.0, "subscription-pin").on_hover_text(summary).clicked() {
+        if c.hit(left, 1.0, width, 28.0, "subscription-pin").on_hover_text(summary).clicked() {
             self.show_page(SUBSCRIPTION_PAGE);
         }
     }
@@ -622,6 +624,11 @@ fn subscription_icon(ui: &mut egui::Ui, size: f32) {
     ui.painter().line_segment([center + egui::vec2(size * 0.18, size * 0.02), center + egui::vec2(0.0, size * 0.2)], egui::Stroke::new(2.0, color));
     ui.painter().line_segment([center + egui::vec2(-size * 0.22, size * 0.3), center + egui::vec2(size * 0.22, size * 0.3)], egui::Stroke::new(2.0, color));
 }
+
+/// 订阅徽标内部间距：图标 24、图标与文字 3、右侧内边距 6。
+const SUB_ICON: f32 = 24.0;
+const SUB_GAP: f32 = 3.0;
+const SUB_PAD: f32 = 6.0;
 
 fn subscription_icon_card(c: &Card, x: f32, y: f32, size: f32) {
     c.fill(x, y, size, size, 7.0, Color32::from_rgb(24, 58, 92));
