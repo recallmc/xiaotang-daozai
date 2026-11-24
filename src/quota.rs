@@ -76,7 +76,10 @@ impl Config {
     pub(crate) fn save_checked(&self)->Result<(),String>{
         let dir=crate::model::config_dir();fs::create_dir_all(&dir).map_err(|_|"无法创建额度配置目录")?;
         let raw=serde_json::to_vec_pretty(&self.json()).map_err(|_|"无法生成额度配置")?;
-        crate::model::atomic_write(&dir.join("ai-quota.json"),&raw).map_err(|_|"无法保存额度配置，原账号未变更".into())
+        let path=dir.join("ai-quota.json");
+        // 覆盖前留一份轮转备份：账号表一旦被写空就再也找不回来。
+        crate::model::rotate_backup(&path,3);
+        crate::model::atomic_write(&path,&raw).map_err(|_|"无法保存额度配置，原账号未变更".into())
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
         if provider.api_key(){return Err("请使用 API Key 连接，无需登录 JSON".into());}
@@ -107,6 +110,28 @@ impl Config {
         let alias=if alias.trim().is_empty(){format!("Grok Bot · 账号 {}",self.accounts.iter().filter(|a|a.provider==Provider::GrokBot).count()+1)}else{alias};
         self.selected=id.clone();self.accounts.push(Account{id,provider:Provider::GrokBot,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});
     }
+    /// 从 `credentials/` 里的登录凭证补回**登录态账号**（WorkBuddy / Gemini / 豆包）。
+    ///
+    /// 这些账号的登录凭据单独存在磁盘上，只有账号条目写在 `ai-quota.json`。
+    /// 条目丢了（配置文件被清空、手动删错）时，凭证还在，可以按凭证文件名重建条目。
+    pub(crate) fn discover_credentials(&mut self)->usize{
+        let dir=crate::model::config_dir().join("credentials");
+        let Ok(entries)=fs::read_dir(&dir) else {return 0;};
+        let mut added=0;
+        for entry in entries.flatten(){
+            let name=entry.file_name().to_string_lossy().into_owned();
+            let Some(stem)=name.strip_suffix(".bin") else {continue;};
+            let Some((kind,slot))=stem.split_once('-') else {continue;};
+            let provider=match kind{"workbuddy"=>Provider::WorkBuddy,"gemini"=>Provider::Gemini,"doubao"=>Provider::Doubao,_=>continue};
+            if slot.is_empty()||self.accounts.iter().any(|a|a.provider==provider&&a.slot.as_deref()==Some(slot)){continue;}
+            let id=format!("{}-{}",provider.name(),slot);
+            self.accounts.push(Account{id,provider,alias:provider.name().to_string(),source:PathBuf::new(),slot:Some(slot.to_string()),enabled:true,pinned:true});
+            added+=1;
+        }
+        if added>0&&self.selected.is_empty(){if let Some(first)=self.accounts.first(){self.selected=first.id.clone();}}
+        added
+    }
+
     pub(crate) fn connect_workbuddy(&mut self,slot:String,alias:String)->String{
         if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::WorkBuddy && a.slot.as_deref()==Some(&slot)){
             a.enabled=true;if !alias.trim().is_empty(){a.alias=alias;}self.selected=a.id.clone();return a.id.clone();

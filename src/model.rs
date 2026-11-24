@@ -21,7 +21,47 @@ pub fn config_dir() -> PathBuf {
     if let Ok(root) = std::env::var("DAOZAI_DATA_DIR") {
         return PathBuf::from(root);
     }
-    env_dir("APPDATA").join("Daozai")
+    // 测试进程里**绝不允许**落到真实配置目录。
+    //
+    // 以前这里是 `env_dir("APPDATA").join("Daozai")`，而测试靠全局环境变量
+    // `DAOZAI_DATA_DIR` 做隔离：并行跑用例时只要有一个用例把变量删掉
+    // （它自己之前没设过），同一时刻别的用例保存设置/额度就会写进用户的真实配置，
+    // 把真实数据覆盖成测试夹具里的空表。现在兜底到进程级临时目录，
+    // 这种竞态最多污染临时文件。
+    #[cfg(test)]
+    {
+        static FALLBACK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let dir = FALLBACK.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("daozai-test-fallback-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            dir
+        });
+        return dir.clone();
+    }
+    #[cfg(not(test))]
+    {
+        env_dir("APPDATA").join("Daozai")
+    }
+}
+
+/// 覆盖写之前先轮转备份：`name.bak` ← 旧内容，`name.bak2` ← 旧 `.bak`，以此类推。
+///
+/// 用户数据（额度账号、订阅链接）一旦被写坏就找不回来，所以每次保存前留一份。
+pub fn rotate_backup(path: &Path, generations: usize) {
+    if !path.is_file() {
+        return;
+    }
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { return; };
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let slot = |index: usize| dir.join(if index == 0 { format!("{name}.bak") } else { format!("{name}.bak{}", index + 1) });
+    let _ = fs::remove_file(slot(generations.saturating_sub(1)));
+    for index in (1..generations.saturating_sub(1)).rev() {
+        let from = slot(index - 1);
+        if from.is_file() {
+            let _ = fs::rename(&from, slot(index));
+        }
+    }
+    let _ = fs::copy(path, slot(0));
 }
 
 fn read_kv(path: &Path) -> Vec<(String, String)> {
@@ -999,5 +1039,45 @@ impl NotificationApps {
         if let Some(item)=self.items.iter().find(|a|a.0==id){return item.2;}
         let enabled=true;
         self.items.push((id.to_string(),name.to_string(),enabled));self.save();enabled
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    /// 测试进程绝不能落到真实的 `%APPDATA%\Daozai`。
+    ///
+    /// 以前这里会回落到真实目录：并行用例里只要有一个把 `DAOZAI_DATA_DIR` 删掉，
+    /// 同刻别的用例保存设置/额度就会写进用户真实配置，把账号表覆盖成夹具的空表。
+    #[test]
+    fn config_dir_never_points_at_the_real_profile_in_tests() {
+        let previous = std::env::var_os("DAOZAI_DATA_DIR");
+        std::env::remove_var("DAOZAI_DATA_DIR");
+        let dir = config_dir();
+        if let Some(previous) = previous {
+            std::env::set_var("DAOZAI_DATA_DIR", previous);
+        }
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let real = PathBuf::from(appdata).join("Daozai");
+            assert!(!dir.starts_with(&real), "测试的配置目录落到了真实目录：{}", dir.display());
+        }
+    }
+
+    /// 保存前会留下轮转备份：连写两次，`.bak` 是上一次的内容。
+    #[test]
+    fn rotate_backup_keeps_the_previous_generation() {
+        let dir = std::env::temp_dir().join(format!("daozai-backup-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("ai-quota.json");
+        fs::write(&path, b"first").unwrap();
+        rotate_backup(&path, 3);
+        assert_eq!(fs::read(dir.join("ai-quota.json.bak")).unwrap(), b"first");
+        fs::write(&path, b"second").unwrap();
+        rotate_backup(&path, 3);
+        assert_eq!(fs::read(dir.join("ai-quota.json.bak")).unwrap(), b"second");
+        assert_eq!(fs::read(dir.join("ai-quota.json.bak2")).unwrap(), b"first");
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

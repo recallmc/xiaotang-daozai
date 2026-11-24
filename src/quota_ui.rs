@@ -350,7 +350,14 @@ impl App {
         self.quota.note.clear();self.quota.kiro_connecting=Some(quota::kiro::Connect::start(path,self.quota.alias.clone(),target));
     }
     pub fn quota_config(&self)->&Config{&self.quota.config}
-    pub fn quota_initialize(&mut self){if !crate::model::config_dir().join("ai-quota.json").exists(){self.quota.config.discover();self.quota.config.save();}}
+    pub fn quota_initialize(&mut self){
+        let path=crate::model::config_dir().join("ai-quota.json");
+        let mut changed=!path.exists();
+        if changed {self.quota.config.discover();}
+        // 账号表为空（配置被清空、或第一次启动）时，用本地登录凭证把登录态账号补回来。
+        if self.quota.config.accounts.is_empty() && self.quota.config.discover_credentials()>0 {changed=true;}
+        if changed {self.quota.config.save();}
+    }
     pub fn quota_pending(&mut self,accounts:&[Account]){self.quota.busy.extend(accounts.iter().map(|a|a.id.clone()));}
     pub fn quota_event(&mut self,event:quota::Event){self.quota.receive(event);}
     pub fn quota_set_source(&mut self,path:std::path::PathBuf){self.quota.source=path.to_string_lossy().into_owned();}
