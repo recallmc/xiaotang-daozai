@@ -115,17 +115,12 @@ fn island_radius(w: f32, h: f32, pc: f32, pill: bool, thickness: f32) -> f32 {
     }
 }
 
-/// 顶部圆角半径（原来是「刘海肩宽」的外翻，现已取消）。
-///
-/// 常驻组件越多岛越长，而外翻只是长直边两端几像素的凸起 —— 长条看上去
-/// 仍是一条"矩形"。改成顶部圆角后：收起态就是**四角全圆的胶囊**，
-/// 长高过程中两端始终是圆的，不可能再出现直角或方块。
+/// 顶部外翻肩宽：跟随高度，缩到很小的时候自然收敛，不会突然跳成 0。
 fn island_flare(h: f32, pc: f32, pill: bool) -> f32 {
-    let half = (h * 0.5).max(0.0);
     if pill {
-        half
+        0.0
     } else {
-        lerp(15.0, 18.0, pc.clamp(0.0, 1.0)).min(half)
+        lerp(5.0, FLARE, pc.clamp(0.0, 1.0)).min((h * 0.5).max(0.0) * 0.6)
     }
 }
 
@@ -167,6 +162,30 @@ mod island_shape_tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// 常驻内容永远不能溢出身体：岛体一变长（比常驻条窄、被上限截断），
+    /// 两端图标就会被身体边缘平直切掉 —— 用户从第一天就在反馈这件事。
+    #[test]
+    fn resident_content_never_overflows_the_body() {
+        let margin = 12.0;
+        for &layout_w in &[96.0_f32, 300.0, 510.0, 604.0, 760.0] {
+            for &body_w in &[44.0_f32, 120.0, 300.0, 419.0, 510.0, 604.0] {
+                let fit = if body_w >= layout_w {
+                    1.0
+                } else {
+                    ((body_w - 24.0) / layout_w).clamp(0.0, 1.0)
+                }.min(((BODY_MAX - 26.0) / layout_w).min(1.0));
+                // 布局自带 16 点内边距，图标在盒子里面；缩放后整体必须落在身体里，
+                // 两端还各留 margin 的余量。
+                let pad = 16.0;
+                let icon_left = fit * (layout_w * 0.5 - pad);
+                assert!(
+                    icon_left <= body_w * 0.5 - margin + 0.01,
+                    "内容溢出身体：layout={layout_w} body={body_w} fit={fit} icon_left={icon_left}"
+                );
             }
         }
     }
@@ -1807,6 +1826,27 @@ impl App {
         }
     }
 
+    /// 常驻内容的缩放系数：**必须同时受内容上限和身体实际宽度约束**。
+    ///
+    /// 以前只看 `CONTENT_MAX`（固定 578），完全没考虑身体有多宽：
+    /// 岛体一旦比常驻条窄（条被上限截断、收起动画中、或宽度弹簧滞后），
+    /// 内容就溢出身体，两端图标被身体边缘**平直切掉一半** —— 这正是
+    /// 用户从第一天就在说的「岛长度一变长就出问题」。
+    /// 现在按 `身体宽度 / 常驻条宽度` 缩放，任何长度下两端都不会被切。
+    pub(crate) fn resident_fit(&self) -> f32 {
+        let layout_w = self.resident.target.width.max(1.0);
+        let body_w = self.w.pos.max(1.0);
+        // 身体不比常驻条窄时不动内容（保持现在的观感）；
+        // 一旦身体窄过常驻条（条变长被上限截断、收起动画中、宽度弹簧滞后），
+        // 内容整体缩到身体里并留出两端 12 点余量 —— 任何长度下两端图标都不会被切。
+        let by_body = if body_w >= layout_w {
+            1.0
+        } else {
+            ((body_w - 24.0) / layout_w).clamp(0.0, 1.0)
+        };
+        by_body.min((CONTENT_MAX / layout_w).min(1.0))
+    }
+
     /// 0 = 药丸，1 = 完整面板（展开时可略超过 1）。
     #[cfg(test)]
     pub(crate) fn current_width(&self) -> f32 { self.w.pos+self.notice_width.pos }
@@ -2179,7 +2219,7 @@ impl App {
         if pet_alpha>0.004 && !minimal_pill {
             let y=(h.min(self.base_size().1)-BAR_H).max(0.0)/2.0;
             // 吉祥物跟随皮肤换色：浅色底上变成深色版本，保持清晰。
-            let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{(CONTENT_MAX/self.resident.target.width).min(1.0)};
+            let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{self.resident_fit()};
             self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,self.skin_palette());
         }
         if reveal > 0.004 && !banner && !restoring_lyrics {
@@ -2794,8 +2834,8 @@ impl App {
     // ---------------------------------------------------------------
     fn shared_header(&mut self, base: &Card, cx: f32, p: f32, reveal: f32, env: &Env) {
         let local_cx = cx - base.origin.x;
-        // 内容按 CONTENT_MAX 缩放：常驻条再长也留出两端呼吸位，图标不会被身体边缘切。
-        let fit=(CONTENT_MAX/self.resident.target.width).min(1.0);
+        // 内容按身体宽度缩放：常驻条再长、岛体再窄，两端图标都不会被身体边缘平切。
+        let fit=self.resident_fit();
         let fitted=base.scaled(local_cx,15.0,lerp(fit,1.0,p));
         let base=&fitted;
         let lyric=self.island_lyric().map(|(index,_)|index);

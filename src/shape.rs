@@ -58,25 +58,19 @@ pub fn shadow_docked(painter: &egui::Painter, rect: Rect, dock: Dock, flare: f32
 }
 
 /// (y, 左 x, 右 x) 轮廓采样行。
-///
-/// `flare` 现在表示**顶部圆角半径**（原来是"刘海肩宽"的外翻）。
-/// 外翻取消的原因：岛体一旦被常驻组件撑长，外翻只是一条 640 px 直边两端的
-/// 几像素凸起，眼睛看到的仍是"一条长矩形"；用户连续多轮反馈的正是这个。
-/// 改成顶部圆角后，长条是两段圆头，长高过程也不会出现直角板块。
-/// `flare_h` 仅为兼容旧调用保留，不再参与计算。
 pub fn sections(rect: Rect, flare: f32, flare_h: f32, radius: f32) -> Vec<(f32, f32, f32)> {
     let (x0, y0, x1, y1) = (rect.left(), rect.top(), rect.right(), rect.bottom());
-    let _ = flare_h;
-    let half = rect.height() * 0.5;
-    let r = radius.min(half).min(rect.width() * 0.5).max(0.0);
-    let rt = flare.min(half).min(rect.width() * 0.5).max(0.0);
-    let mut rows = Vec::with_capacity(56);
-    const N_TOP: usize = 14;
-    for i in 0..=N_TOP {
-        let a = i as f32 / N_TOP as f32 * std::f32::consts::FRAC_PI_2;
-        rows.push((y0 + rt - rt * a.cos(), x0 + rt - rt * a.sin(), x1 - rt + rt * a.sin()));
+    let r = radius.min(rect.height() * 0.5).min(rect.width() * 0.5).max(0.0);
+    let fh = flare_h.min(rect.height() * 0.5).max(0.5);
+    let mut rows = Vec::with_capacity(48);
+    const N_FLARE: usize = 14;
+    for i in 0..=N_FLARE {
+        let t = i as f32 / N_FLARE as f32;
+        // 肩部曲线：(1-t)^2.4 比三次方更饱满，过渡更柔。
+        let wing = flare * (1.0 - t).powf(2.4);
+        rows.push((y0 + fh * t, x0 - wing, x1 + wing));
     }
-    if y1 - r > y0 + rt {
+    if y1 - r > y0 + fh {
         rows.push((y1 - r, x0, x1));
     }
     const N_CORNER: usize = 20;
@@ -266,23 +260,15 @@ mod tests {
         }
     }
 
-    /// 顶部改成圆角后：整条轮廓都落在外接矩形内，左右两端上下都是圆的。
     #[test]
-    fn top_corners_are_rounded_and_stay_inside_the_rect() {
+    fn wings_extend_outside_body_only_at_top() {
         let rect = Rect::from_min_size(Pos2::new(110.0, 0.0), Vec2::new(419.0, 140.0));
-        let pts = outline(rect, 18.0, 16.0, 33.0);
-        let b = Rect::from_points(&pts);
-        assert!(b.left() >= rect.left() - 0.01 && b.right() <= rect.right() + 0.01, "轮廓不能越出外接矩形：{b:?}");
-        // 顶行必须向内收（有顶部圆角），中线处才是满宽。
-        let rows = sections(rect, 18.0, 16.0, 33.0);
-        let top = rows.first().copied().unwrap();
-        let widest = rows.iter().min_by(|a, b| a.1.total_cmp(&b.1)).copied().unwrap();
-        assert!(top.1 >= rect.left() + 17.9, "顶部圆角内收不足：{top:?}");
-        assert!((widest.1 - rect.left()).abs() < 0.01, "最宽处应满宽：{widest:?}");
-        // 角上不该有岛体
-        assert!(!inside(&pts, Pos2::new(rect.left() + 1.0, rect.top() + 1.0)));
+        let pts = outline(rect, 17.6, 16.0, 33.0);
+        assert!(pts.iter().any(|p| p.x < rect.left() - 17.0));
+        assert!(inside(&pts, Pos2::new(rect.left() + 0.2, 70.0)));
+        assert!(!inside(&pts, Pos2::new(rect.left() - 0.5, 70.0)));
+        // 底部圆角外侧是空的
         assert!(!inside(&pts, Pos2::new(rect.left() + 2.0, rect.bottom() - 2.0)));
-        assert!(inside(&pts, Pos2::new(rect.left() + 40.0, 70.0)));
     }
 }
 
@@ -290,17 +276,19 @@ mod tests {
 mod dock_tests {
     use super::*;
     #[test]
-    fn side_outlines_stay_within_the_rect_and_hug_the_screen_edge() {
+    fn side_outlines_hug_the_screen_edge_with_the_wings_along_it() {
         let rect = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(419.0, 140.0));
-        let left = outline_docked(rect, Dock::Left, 18.0, 16.0, 33.0);
+        let left = outline_docked(rect, Dock::Left, 17.6, 16.0, 33.0);
         let b = Rect::from_points(&left);
         assert!((b.left() - 0.0).abs() < 0.01 && (b.right() - 419.0).abs() < 0.01, "{b:?}");
-        // 不再有外翻肩：轮廓始终贴着屏幕边缘，不外扩。
-        assert!(b.top() >= 100.0 - 0.01 && b.bottom() <= 240.0 + 0.01, "不应超出外接矩形：{b:?}");
+        assert!(b.top() < 100.0 - 17.0 && b.bottom() > 240.0 + 17.0, "肩部沿屏幕边缘上下展开：{b:?}");
+        // 肩部只在贴边处
+        assert!(left.iter().filter(|p| p.y < 99.0).all(|p| p.x < 16.5));
         let right_rect = Rect::from_min_size(Pos2::new(81.0, 100.0), Vec2::new(419.0, 140.0));
-        let right = outline_docked(right_rect, Dock::Right, 18.0, 16.0, 33.0);
+        let right = outline_docked(right_rect, Dock::Right, 17.6, 16.0, 33.0);
         let b = Rect::from_points(&right);
         assert!((b.right() - 500.0).abs() < 0.01 && (b.left() - 81.0).abs() < 0.01, "{b:?}");
+        assert!(right.iter().filter(|p| p.y < 99.0).all(|p| p.x > 500.0 - 16.5));
         assert_eq!(outline_docked(rect, Dock::Top, 5.0, 8.0, 12.0), outline(rect, 5.0, 8.0, 12.0));
     }
 }
