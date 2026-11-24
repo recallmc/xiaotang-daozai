@@ -442,9 +442,13 @@ pub(crate) fn is_browser_process(name:&str)->bool {
 
 fn browser_overlaps_island(browser:RECT,island:RECT,dock:crate::model::Dock)->bool {
     if dock.is_side() {return window_covers_side(browser,island,dock);}
-    // 窗口是 CANVAS_W 宽的透明画布，岛体中心固定在画布左侧 WIN_W/2 处（与水平位置、大小无关）。
-    let scale=(island.right-island.left) as f32/crate::app::CANVAS_W;
-    let center=island.left as f32+crate::app::WIN_W*scale/2.0;
+    // 窗口 = 画布 + 右侧通知预留；画布宽度会跟着岛体变宽，所以不能再用常量反推缩放比。
+    // 窗口高度固定 `WIN_H`，用它求缩放比最稳，再减掉右侧预留得到画布实际像素宽。
+    let height=(island.bottom-island.top) as f32;
+    let scale=if height>0.0 {height/crate::app::WIN_H} else {1.0};
+    let reserved=(crate::app::CANVAS_W-crate::app::WIN_W)*scale;
+    let canvas_px=(island.right-island.left) as f32-reserved;
+    let center=island.left as f32+canvas_px/2.0;
     let half=crate::app::PW*scale/2.0;
     (browser.left as f32)<center+half && (browser.right as f32)>center-half
         && (browser.top as f32)<island.top as f32+crate::app::BAR_H*scale && browser.bottom>island.top

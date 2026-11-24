@@ -99,7 +99,7 @@ impl App {
     pub fn backdrop_points(&self) -> Vec<(f32, f32)> {
         match self.dock() {
             Dock::Top => {
-                let cx = crate::app::WIN_W / 2.0;
+                let cx = self.canvas_w / 2.0;
                 let bottom = crate::app::WIN_H - 6.0;
                 vec![(cx - 270.0, 6.0), (cx - 270.0, 26.0), (cx + 270.0, 6.0), (cx + 270.0, 26.0), (cx - 130.0, bottom), (cx, bottom), (cx + 130.0, bottom)]
             }
