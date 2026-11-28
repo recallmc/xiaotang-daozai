@@ -11867,3 +11867,27 @@ fn hover_swell_never_grows_past_the_canvas() {
     assert!(h.app.w.pos <= limit + 0.01, "悬停胀大后岛体 {} 超出画布上限 {limit}", h.app.w.pos);
     assert!(h.app.w.pos > before, "悬停应当仍有胀大反馈：{} -> {}", before, h.app.w.pos);
 }
+
+/// 拿起岛体时的横向放大同样不能超出画布。
+///
+/// 常驻条顶到宽度上限（608）后，拿起放大 1.08 倍 = 657 > 画布 640，
+/// 左边会被窗口边缘平切 —— 和悬停胀大是同一个原因，上限也用同一个。
+#[test]
+fn lifted_island_never_grows_past_the_canvas() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let bounds = crate::display_layout::Bounds { left: 0, top: 0, right: 1920, bottom: 1080 };
+    let mut h = H::new();
+    h.app.settings.browser_minimal = false;
+    h.app.settings.pet = false;
+    h.quota_accounts(20);
+    let start = island_drag_header(&mut h, bounds, 1.0);
+    island_drag_frame(&mut h, bounds, 1.0, Some(start), Some(true));
+    for _ in 0..30 {
+        island_drag_frame(&mut h, bounds, 1.0, Some(start), None);
+    }
+    let (sx, _) = h.app.drag_scale();
+    let drawn = h.app.w.pos * sx;
+    assert!(h.app.w.pos > 560.0, "前提：拿起后的常驻条应接近宽度上限，实际 {}", h.app.w.pos);
+    assert!(sx > 1.01, "拿起应确实放大（否则这条测试是空的）：{sx}");
+    assert!(drawn <= crate::app::WIN_W - 16.0 + 0.5, "拿起放大后绘制宽度 {drawn} 超出画布");
+}

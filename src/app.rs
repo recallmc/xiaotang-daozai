@@ -3688,11 +3688,15 @@ impl App {
     }
 
     /// 拿起与速度拉伸带来的外形缩放：(宽, 高)。
-    fn drag_scale(&self)->(f32,f32) {
+    pub(crate) fn drag_scale(&self)->(f32,f32) {
         let lift=self.drag_lift.pos.max(0.0);let stretch=self.drag_stretch.pos.max(0.0);
         let along=1.0+LIFT_SCALE.0*lift+stretch;
         let arrival=1.0-smoothstep(0.0,0.12,(self.t-self.crossed_at) as f32);
         let across=(1.0+LIFT_SCALE.1*lift-stretch*0.5)*(1.0-0.22*arrival);
+        // 拿起时的横向放大同样不能把岛体推出画布：画布左边缘就是窗口边缘，
+        // 常驻条顶到宽度上限时 1.08 倍就会溢出几个点，左边被平切。
+        // 厚度方向（`across`）在画布高度内，不用管。
+        let along=if self.side() {along} else {along.min((self.swell_limit()/self.w.pos.max(1.0)).max(1.0))};
         if self.side() {(across,along)}else{(along,across)}
     }
 
