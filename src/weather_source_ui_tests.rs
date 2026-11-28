@@ -19,7 +19,7 @@ fn weather_badge_only_dims_after_repeated_failures_and_old_data(){
             let snapshot=crate::weather::Snapshot{place:"广州".into(),temp:23.0,code:2,day:true,at:chrono::Utc::now().timestamp()-age,..Default::default()};
             let output=h.ctx.run(Default::default(),|ctx|{egui::CentralPanel::default().show(ctx,|ui|{
                 let c=crate::paint::Card::new(ui,Pos2::ZERO,ui.max_rect());
-                let layout=crate::bar_layout::Layout::new(false,0,false,false,false,false,true,false);
+                let layout=crate::bar_layout::Layout::new(false,0,false,false,false,false,true);
                 h.app.paint_pill_weather(&c,100.0,&layout,&snapshot);
                 h.app.paint_side_weather(&c,220.0,30.0,&snapshot);
             });});
@@ -117,6 +117,9 @@ fn qweather_city_dropdown_supports_fuzzy_input_keyboard_selection_and_add(){
     assert!(h.ctx.memory(|m|m.is_popup_open(egui::Id::new("qweather-city-options"))));
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="杭州")),"模糊输入应显示匹配候选");
     let key=|key|egui::Event::Key{key,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()};
+    draw(&mut h,vec![egui::Event::Ime(egui::ImeEvent::Enabled),key(egui::Key::ArrowDown)],egui::vec2(740.0,1100.0),1.0);
+    draw(&mut h,vec![egui::Event::Ime(egui::ImeEvent::Disabled),key(egui::Key::Enter)],egui::vec2(740.0,1100.0),1.0);
+    assert_eq!(h.app.weather_source.query,"杭","输入法选词不能选中城市");
     draw(&mut h,vec![key(egui::Key::ArrowDown)],egui::vec2(740.0,1100.0),1.0);
     draw(&mut h,vec![key(egui::Key::Enter)],egui::vec2(740.0,1100.0),1.0);
     assert_eq!(h.app.weather_source.query,"余杭");

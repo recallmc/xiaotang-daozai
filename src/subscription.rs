@@ -377,17 +377,17 @@ impl App {
         if !self.settings.visible_pages[SUBSCRIPTION_PAGE] || self.settings.minimal || self.subscriptions.items.is_empty() { 0 } else { 1 }
     }
 
-    /// 订阅徽标超出手册最小宽度（图标 24 + 间距 3）的部分：只有百分比文字比它长时才需要补。
-    pub(crate) fn subscription_bar_extra(&self, ctx: &egui::Context) -> f32 {
+    /// 订阅徽标占用的完整宽度：图标 + 间距 + 百分比文字 + 右内边距。
+    pub(crate) fn subscription_bar_width(&self, ctx: &egui::Context) -> f32 {
         let text = self.subscriptions.items.iter().find(|item| item.id == self.subscriptions.selected)
             .and_then(|item| item.percent()).map(percent_text).unwrap_or_else(|| "--".into());
         let text_w = ctx.fonts(|fonts| fonts.layout_no_wrap(text, theme::font(theme::size::PILL_CLOCK, W::Bold), theme::WHITE).size().x).ceil();
-        (SUB_ICON + SUB_GAP + text_w + SUB_PAD - crate::bar_layout::SUBSCRIPTION_WIDTH).max(0.0)
+        (SUB_ICON + SUB_GAP + text_w + SUB_PAD).max(crate::bar_layout::SUBSCRIPTION_WIDTH)
     }
 
     pub(crate) fn draw_subscription_bar(&mut self, c: &Card, cx: f32, layout: &crate::bar_layout::Layout) {
         let Some(item) = self.subscriptions.items.iter().find(|item| item.id == self.subscriptions.selected).cloned() else { return; };
-        let slot = crate::bar_layout::SUBSCRIPTION;
+        let Some(slot) = layout.subscription else { return; };
         let Some(offset) = layout.x.get(slot).copied().flatten() else { return; };
         let width = layout.widths.get(slot).copied().unwrap_or(crate::bar_layout::SUBSCRIPTION_WIDTH);
         let alpha = layout.pet_clearance(slot);
