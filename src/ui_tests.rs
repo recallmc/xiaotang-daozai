@@ -9309,24 +9309,3 @@ fn settings_window_frames_dump() {
         eprintln!("dumped {tag}");
     }
 }
-
-/// 画布必须跟着常驻条扩宽：条超过基准画布时，岛体不再被 `WIN_W-32` 截断，
-/// 而是把画布（窗口）撑宽，两端各留 `CANVAS_MARGIN/2` 的圆角余量。
-#[test]
-fn canvas_grows_with_the_resident_bar_instead_of_clipping_it() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut h = H::new();
-    h.app.settings.browser_minimal = false;
-    h.app.settings.pet = false;
-    h.quota_accounts(20);
-    for _ in 0..40 {
-        h.cursor = None;
-        h.frame(vec![]);
-    }
-    let bar = h.app.resident.target.width;
-    let baseline = crate::app::WIN_W - crate::app::CANVAS_MARGIN;
-    assert!(bar > baseline, "测试前提：常驻条({bar})应超过基准画布可用宽度({baseline})");
-    let canvas = h.app.canvas_width();
-    assert!(canvas >= bar + crate::app::CANVAS_MARGIN - 0.01, "画布({canvas})没有跟着条({bar})扩宽");
-    assert!(canvas > crate::app::WIN_W, "画布应大于基准宽度：{canvas}");
-}

@@ -48,14 +48,8 @@ pub const BAR_H_MIN: f32 = 4.5;
 pub const FLARE: f32 = 17.6; // 顶部外翻肩宽
 pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
 pub const RAD: f32 = 33.0; // 底部圆角
-/// 画布的**基准**宽度（也是最小宽度）。岛体变宽时画布会按需扩到更宽，
-/// 见 `App::canvas_width()`；这里不再写死成岛的硬上限。
-pub const WIN_W: f32 = 640.0;
-/// 岛体两端各留的余量：圆角、投影需要落地空间，超出就会被窗口边缘切平。
-pub const CANVAS_MARGIN: f32 = 32.0;
-/// 左右停靠时竖向画布在上下两端各留的余量（圆角 + 投影）。
-pub const SIDE_MARGIN: f32 = 40.0;
-pub const CANVAS_W: f32 = WIN_W + 320.0; // 右侧给通知卡片与投影留的空间（在画布之外）。
+pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
+pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
 /// 胶囊皮肤与屏幕顶边的间隙。
 pub const PILL_GAP: f32 = 6.0;
@@ -721,11 +715,6 @@ pub struct App {
     pub(crate) shelf: model::Shelf,
 
     // 形变
-    /// 本帧画布宽度（逻辑点）。顶部停靠时由 `canvas_width()` 跟着岛体扩宽，
-    /// 布局、命中区、毛玻璃取样都以它为基准。
-    pub(crate) canvas_w: f32,
-    /// 本帧画布高度（逻辑点）。左右停靠时由 `canvas_height()` 跟着岛体变长。
-    pub(crate) canvas_h: f32,
     pub(crate) w: Spring,
     pub(crate) h: Spring,
     pub(crate) open: bool,
@@ -938,8 +927,6 @@ impl App {
             todos: model::TodoList::load(),
             water: model::Water::default(),
             shelf: model::Shelf::load(),
-            canvas_w: WIN_W,
-            canvas_h: crate::side_dock::SIDE_H,
             w: Spring::new(bw, CLOSE.0, CLOSE.1),
             h: Spring::new(bh, CLOSE.0, CLOSE.1),
             open: false,
@@ -1805,8 +1792,7 @@ impl App {
     pub fn set_minimal(&mut self,enabled:bool) {
         self.settings.minimal=enabled;if enabled {self.settings.pet=false;}self.settings.save();
     }
-    /// 岛体「想要」的尺寸：**不按画布截断**。画布宽度由它推出来（见 `canvas_width`）。
-    fn desired_size(&self) -> (f32, f32) {
+    fn base_size(&self) -> (f32, f32) {
         if !self.compact_notices()&&!self.open {
             if let Some(a)=&self.notice {let (width,height)=self.notice_size(a);return (width+self.pet_space(),height);}
         }
@@ -1819,41 +1805,8 @@ impl App {
         } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
             (BAR_W_MIN, BAR_H_MIN)
         } else {
-            (self.resident.target.width, BAR_H)
+            (self.resident.target.width.min(WIN_W-32.0), BAR_H)
         }
-    }
-
-    /// 收起态尺寸：想要多大就给多大，但不超过**当前画布**（两端各留 `CANVAS_MARGIN/2`）。
-    ///
-    /// 画布已经按 `canvas_width()` 跟着岛体扩宽，所以这里实际上是恒等；
-    /// 保留这层钳制是为了「画布还没来得及扩宽的那一帧」不会画到窗口外面。
-    fn base_size(&self) -> (f32, f32) {
-        let (w, h) = self.desired_size();
-        if self.side() { return (w, h.min((self.canvas_h - SIDE_MARGIN * 2.0).max(1.0))); }
-        (w.min((self.canvas_w - CANVAS_MARGIN).max(1.0)), h)
-    }
-
-    /// 画布应该多宽：岛体「想要的宽度」+ 两端余量，且不小于基准 `WIN_W`。
-    /// 左右停靠用竖向画布，不参与扩宽。
-    pub fn canvas_width(&self) -> f32 {
-        if self.side() { return crate::side_dock::SIDE_W; }
-        let (w, _) = self.desired_size();
-        // 拿起岛体时会被放大绘制，画布要把放大后的宽度也算进去，否则两端会被窗口切掉。
-        let stretch = self.drag_scale().0.max(1.0);
-        (w * stretch + CANVAS_MARGIN).max(WIN_W)
-    }
-
-    /// 左右停靠时画布应该多高：竖向岛体的长度 + 上下两端余量，不小于基准 `SIDE_H`。
-    pub fn canvas_height(&self) -> f32 {
-        if !self.side() { return WIN_H; }
-        let (_, h) = self.desired_size();
-        let stretch = self.drag_scale().1.max(1.0);
-        (h * stretch + SIDE_MARGIN * 2.0).max(crate::side_dock::SIDE_H)
-    }
-
-    /// 画布尺寸（逻辑点）：顶部是「宽度可变 × WIN_H」，左右是「SIDE_W × 高度可变」。
-    pub fn canvas_size(&self) -> (f32, f32) {
-        if self.side() { (crate::side_dock::SIDE_W, self.canvas_height()) } else { (self.canvas_width(), WIN_H) }
     }
 
     /// 0 = 药丸，1 = 完整面板（展开时可略超过 1）。
@@ -1887,21 +1840,6 @@ impl App {
         let elapsed = self.last_t.map(|at| (env.t - at).max(0.0) as f32).unwrap_or(0.0);
         self.last_t = Some(env.t);
         self.t = env.t;
-        // 画布宽度以本帧实际传入的窗口为准（顶部停靠时由 `canvas_width()` 扩宽）。
-        let previous_canvas = self.canvas_w;
-        let previous_height = self.canvas_h;
-        self.canvas_w = if self.side() { win.width() } else { win.width().max(WIN_W) };
-        self.canvas_h = if self.side() { win.height().max(crate::side_dock::SIDE_H) } else { win.height() };
-        if (previous_canvas - self.canvas_w).abs() > 0.5 || (previous_height - self.canvas_h).abs() > 0.5 {
-            // 画布扩宽/收窄时留一行现场记录，便于核对窗口是否真的跟着改了、岛体有没有偏。
-            use std::io::Write;
-            let dir = crate::model::config_dir().join("diagnostics");
-            let _ = std::fs::create_dir_all(&dir);
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("canvas.log")) {
-                let _ = writeln!(f, "t={:.2} canvas {:.0}x{:.0} -> {:.0}x{:.0} bar={:.0} win={:.0}x{:.0}", self.t, previous_canvas, previous_height, self.canvas_w, self.canvas_h, self.resident.target.width, win.width(), win.height());
-                let _ = f.flush();
-            }
-        }
         self.fullscreen_hidden=env.fullscreen_hidden;
         self.quota_tick();
         self.subscriptions.poll();
@@ -2087,7 +2025,7 @@ impl App {
         let p = self.progress();
         let (sx, sy) = self.drag_scale();
         // 拿起放大不能超出透明画布，否则两端会被切掉。
-        let (max_w, max_h) = (self.canvas_w, self.canvas_h);
+        let (max_w, max_h) = if side {(crate::side_dock::SIDE_W, crate::side_dock::SIDE_H)} else {(WIN_W, WIN_H)};
         let (w, h) = ((self.w.pos * sx).min((max_w - 24.0).max(self.w.pos)), (self.h.pos * sy).min((max_h - 24.0).max(self.h.pos)));
         let panel = self.island_rect(win, w, h);
         let messenger_rect=self.messenger_badge_rect(win,panel);
@@ -2219,7 +2157,7 @@ impl App {
         if pet_alpha>0.004 && !minimal_pill {
             let y=(h.min(self.base_size().1)-BAR_H).max(0.0)/2.0;
             // 吉祥物跟随皮肤换色：浅色底上变成深色版本，保持清晰。
-            let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{((self.canvas_w-32.0)/self.resident.target.width).min(1.0).max(0.35)};
+            let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{((WIN_W-32.0)/self.resident.target.width).min(1.0)};
             self.pet.draw(&base.scaled(cx-origin.x,15.0,fit).shifted(0.0,y).faded(pet_alpha),cx-origin.x+self.resident.position(bar::PET),self.t,self.skin_palette());
         }
         let previous_scroll=self.content_scroll.take();
@@ -2960,7 +2898,7 @@ impl App {
     // ---------------------------------------------------------------
     fn shared_header(&mut self, base: &Card, cx: f32, p: f32, reveal: f32, env: &Env) {
         let local_cx = cx - base.origin.x;
-        let fit=(((self.canvas_w-32.0)/self.resident.target.width).min(1.0)).max(0.35);
+        let fit=((WIN_W-32.0)/self.resident.target.width).min(1.0);
         let fitted=base.scaled(local_cx,15.0,lerp(fit,1.0,p));
         let base=&fitted;
         let lyric=self.island_lyric().map(|(index,_)|index);

@@ -56,8 +56,7 @@ impl App {
 
     /// 收起态尺寸（屏幕宽 × 高）。极简模式是贴边的一小段竖线。
     pub(crate) fn side_base_size(&self, minimal: bool) -> (f32, f32) {
-        // 长度不再按固定画布截断：画布会跟着变高（见 App::canvas_height）。
-        if minimal { (BAR_H_MIN, BAR_W_MIN) } else { (SIDE_BAR_W, self.side_bar_len()) }
+        if minimal { (BAR_H_MIN, BAR_W_MIN) } else { (SIDE_BAR_W, self.side_bar_len().min(SIDE_H-24.0)) }
     }
 
     fn side_gap(&self) -> f32 {
@@ -100,14 +99,14 @@ impl App {
     pub fn backdrop_points(&self) -> Vec<(f32, f32)> {
         match self.dock() {
             Dock::Top => {
-                let cx = self.canvas_w / 2.0;
+                let cx = crate::app::WIN_W / 2.0;
                 let bottom = crate::app::WIN_H - 6.0;
                 vec![(cx - 270.0, 6.0), (cx - 270.0, 26.0), (cx + 270.0, 6.0), (cx + 270.0, 26.0), (cx - 130.0, bottom), (cx, bottom), (cx + 130.0, bottom)]
             }
             dock => {
                 let (near, far) = if dock == Dock::Left { (6.0, SIDE_W - 6.0) } else { (SIDE_W - 6.0, 6.0) };
                 let mid = if dock == Dock::Left { 26.0 } else { SIDE_W - 26.0 };
-                let cy = self.canvas_h / 2.0;
+                let cy = SIDE_H / 2.0;
                 vec![(near, cy - 170.0), (mid, cy - 170.0), (near, cy + 170.0), (mid, cy + 170.0), (far, cy - 60.0), (far, cy), (far, cy + 60.0)]
             }
         }
@@ -118,7 +117,7 @@ impl App {
         let items = self.side_items();
         let total: f32 = items.iter().map(|i| i.height(self.settings.clock_seconds)).sum();
         let cx = width / 2.0;
-        let fitted=c.scaled(cx,height/2.0,((self.canvas_h-24.0)/(total+14.0)).min(1.0).max(0.35));
+        let fitted=c.scaled(cx,height/2.0,((SIDE_H-24.0)/(total+14.0)).min(1.0));
         let c=&fitted;
         let mut y = (height - total) / 2.0;
         for item in items {
