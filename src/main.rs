@@ -36,7 +36,7 @@ struct Shell {
     placement_at: PollClock,
     placement_scale: f32,
     /// 上次定位时的目标屏幕、水平位置与 OLED 像素偏移；变化后立即重新定位，不等下一次轮询。
-    placement_key: (String, i32, daozai::model::Dock, bool, (i32, i32), i32),
+    placement_key: (String, i32, daozai::model::Dock, bool, (i32, i32), (i32, i32)),
     /// OLED 像素偏移当前实际使用的位移；展开、拖拽、隐藏时保持不变。
     #[cfg(windows)]
     oled_shift: (i32, i32),
@@ -198,7 +198,7 @@ impl Shell {
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
-            placement_key: (String::new(), 0, daozai::model::Dock::Top, true, (0, 0), 0),
+            placement_key: (String::new(), 0, daozai::model::Dock::Top, true, (0, 0), (0, 0)),
             #[cfg(windows)]
             oled_shift: (0, 0),
             win_x: 0.0,
@@ -401,7 +401,8 @@ impl eframe::App for Shell {
         let shift=self.oled_shift;
         // 拖动时位置不取整，按万分之一比例比较，窗口逐帧平滑跟随。
         #[cfg(windows)]
-        let canvas_key=(self.app.canvas_width()*10.0).round() as i32;
+        let (canvas_w,canvas_h)=self.app.canvas_size();
+        let canvas_key=((canvas_w*10.0).round() as i32,(canvas_h*10.0).round() as i32);
         let placement_key=(self.app.settings.display_id.clone(),(offset*10000.0).round() as i32,self.app.settings.dock,self.app.settings.avoids_top_bar(),shift,canvas_key);
         #[cfg(windows)]
         if !self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1)) {
@@ -415,7 +416,7 @@ impl eframe::App for Shell {
             self.placement_scale=ctx.pixels_per_point();
             self.placement_key=placement_key;
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,daozai::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar()),offset,self.app.settings.dock,shift,self.app.canvas_width()))) {
+            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,daozai::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar()),offset,self.app.settings.dock,shift,self.app.canvas_size()))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -603,8 +604,8 @@ impl eframe::App for Shell {
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
             .show(ctx, |ui| {
                 // 左右停靠时画布是竖向的 SIDE_W × SIDE_H。
-                // 顶部停靠时画布跟着岛体扩宽（见 App::canvas_width），岛在屏幕上的位置不变。
-                let size=if self.app.settings.dock.is_side() {egui::vec2(daozai::side_dock::SIDE_W,daozai::side_dock::SIDE_H)} else {egui::vec2(self.app.canvas_width(),app::WIN_H)};
+                                let (canvas_w,canvas_h)=self.app.canvas_size();
+                let size=egui::vec2(canvas_w,canvas_h);
                 let win = egui::Rect::from_min_size(ui.max_rect().min,size);
                 out = Some(self.app.frame(ui, win, &env));
             });
@@ -623,7 +624,7 @@ impl eframe::App for Shell {
             if shift!=self.oled_shift {
                 self.oled_shift=shift;
                 let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-                if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(ctx.pixels_per_point(),daozai::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar()),self.app.placement_offset(),self.app.settings.dock,shift,self.app.canvas_width()))) {
+                if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(ctx.pixels_per_point(),daozai::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar()),self.app.placement_offset(),self.app.settings.dock,shift,self.app.canvas_size()))) {
                     self.placement_key.4=shift;
                 }
                 ctx.request_repaint();

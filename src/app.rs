@@ -53,6 +53,8 @@ pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0;
 /// 岛体两端各留的余量：圆角、投影需要落地空间，超出就会被窗口边缘切平。
 pub const CANVAS_MARGIN: f32 = 32.0;
+/// 左右停靠时竖向画布在上下两端各留的余量（圆角 + 投影）。
+pub const SIDE_MARGIN: f32 = 40.0;
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 右侧给通知卡片与投影留的空间（在画布之外）。
 pub const WIN_H: f32 = 270.0;
 /// 胶囊皮肤与屏幕顶边的间隙。
@@ -722,6 +724,8 @@ pub struct App {
     /// 本帧画布宽度（逻辑点）。顶部停靠时由 `canvas_width()` 跟着岛体扩宽，
     /// 布局、命中区、毛玻璃取样都以它为基准。
     pub(crate) canvas_w: f32,
+    /// 本帧画布高度（逻辑点）。左右停靠时由 `canvas_height()` 跟着岛体变长。
+    pub(crate) canvas_h: f32,
     pub(crate) w: Spring,
     pub(crate) h: Spring,
     pub(crate) open: bool,
@@ -935,6 +939,7 @@ impl App {
             water: model::Water::default(),
             shelf: model::Shelf::load(),
             canvas_w: WIN_W,
+            canvas_h: crate::side_dock::SIDE_H,
             w: Spring::new(bw, CLOSE.0, CLOSE.1),
             h: Spring::new(bh, CLOSE.0, CLOSE.1),
             open: false,
@@ -1824,16 +1829,31 @@ impl App {
     /// 保留这层钳制是为了「画布还没来得及扩宽的那一帧」不会画到窗口外面。
     fn base_size(&self) -> (f32, f32) {
         let (w, h) = self.desired_size();
-        if self.side() { return (w, h); }
+        if self.side() { return (w, h.min((self.canvas_h - SIDE_MARGIN * 2.0).max(1.0))); }
         (w.min((self.canvas_w - CANVAS_MARGIN).max(1.0)), h)
     }
 
     /// 画布应该多宽：岛体「想要的宽度」+ 两端余量，且不小于基准 `WIN_W`。
     /// 左右停靠用竖向画布，不参与扩宽。
     pub fn canvas_width(&self) -> f32 {
-        if self.side() { return WIN_W; }
+        if self.side() { return crate::side_dock::SIDE_W; }
         let (w, _) = self.desired_size();
-        (w + CANVAS_MARGIN).max(WIN_W)
+        // 拿起岛体时会被放大绘制，画布要把放大后的宽度也算进去，否则两端会被窗口切掉。
+        let stretch = self.drag_scale().0.max(1.0);
+        (w * stretch + CANVAS_MARGIN).max(WIN_W)
+    }
+
+    /// 左右停靠时画布应该多高：竖向岛体的长度 + 上下两端余量，不小于基准 `SIDE_H`。
+    pub fn canvas_height(&self) -> f32 {
+        if !self.side() { return WIN_H; }
+        let (_, h) = self.desired_size();
+        let stretch = self.drag_scale().1.max(1.0);
+        (h * stretch + SIDE_MARGIN * 2.0).max(crate::side_dock::SIDE_H)
+    }
+
+    /// 画布尺寸（逻辑点）：顶部是「宽度可变 × WIN_H」，左右是「SIDE_W × 高度可变」。
+    pub fn canvas_size(&self) -> (f32, f32) {
+        if self.side() { (crate::side_dock::SIDE_W, self.canvas_height()) } else { (self.canvas_width(), WIN_H) }
     }
 
     /// 0 = 药丸，1 = 完整面板（展开时可略超过 1）。
@@ -1869,14 +1889,17 @@ impl App {
         self.t = env.t;
         // 画布宽度以本帧实际传入的窗口为准（顶部停靠时由 `canvas_width()` 扩宽）。
         let previous_canvas = self.canvas_w;
+        let previous_height = self.canvas_h;
         self.canvas_w = if self.side() { win.width() } else { win.width().max(WIN_W) };
-        if (previous_canvas - self.canvas_w).abs() > 0.5 {
+        self.canvas_h = if self.side() { win.height().max(crate::side_dock::SIDE_H) } else { win.height() };
+        if (previous_canvas - self.canvas_w).abs() > 0.5 || (previous_height - self.canvas_h).abs() > 0.5 {
             // 画布扩宽/收窄时留一行现场记录，便于核对窗口是否真的跟着改了、岛体有没有偏。
             use std::io::Write;
             let dir = crate::model::config_dir().join("diagnostics");
             let _ = std::fs::create_dir_all(&dir);
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("canvas.log")) {
-                let _ = writeln!(f, "t={:.2} canvas {:.0}->{:.0} bar={:.0} win={:.0}x{:.0}", self.t, previous_canvas, self.canvas_w, self.resident.target.width, win.width(), win.height());
+                let _ = writeln!(f, "t={:.2} canvas {:.0}x{:.0} -> {:.0}x{:.0} bar={:.0} win={:.0}x{:.0}", self.t, previous_canvas, previous_height, self.canvas_w, self.canvas_h, self.resident.target.width, win.width(), win.height());
+                let _ = f.flush();
             }
         }
         self.fullscreen_hidden=env.fullscreen_hidden;
@@ -2064,7 +2087,7 @@ impl App {
         let p = self.progress();
         let (sx, sy) = self.drag_scale();
         // 拿起放大不能超出透明画布，否则两端会被切掉。
-        let (max_w, max_h) = if side {(crate::side_dock::SIDE_W, crate::side_dock::SIDE_H)} else {(self.canvas_w, WIN_H)};
+        let (max_w, max_h) = (self.canvas_w, self.canvas_h);
         let (w, h) = ((self.w.pos * sx).min((max_w - 24.0).max(self.w.pos)), (self.h.pos * sy).min((max_h - 24.0).max(self.h.pos)));
         let panel = self.island_rect(win, w, h);
         let messenger_rect=self.messenger_badge_rect(win,panel);

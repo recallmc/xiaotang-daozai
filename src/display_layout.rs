@@ -53,7 +53,9 @@ pub fn island_origin(m:Bounds, island_width:f32, scale:f32)->Option<(i32,i32)> {
     if m.right<=m.left || m.bottom<=m.top || !scale.is_finite() || scale<=0.0 || !island_width.is_finite() || island_width<=0.0 {return None;}
     let width=(island_width as f64*scale as f64).round();
     let x=(m.left as f64+(m.right as f64-m.left as f64-width)/2.0).round();
-    Some((x.clamp(i32::MIN as f64,i32::MAX as f64) as i32,m.top))
+    // 画布比屏幕还宽时（岛体极长），宁可贴住左边缘也不要把窗口推到屏幕外。
+    let max_x=(m.right as f64-width).max(m.left as f64);
+    Some((x.clamp(m.left as f64,max_x) as i32,m.top))
 }
 
 /// 岛体可见内容（展开面板、肩部与阴影）距中心的最大半宽，逻辑点。
