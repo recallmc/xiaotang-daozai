@@ -11839,3 +11839,31 @@ fn performance_morph_film() {
 #[cfg(all(windows, feature = "sdk-js"))]
 #[path = "plugin_status_ui_tests.rs"]
 mod plugin_status_ui_tests;
+
+/// 悬停胀大不能把岛体胀出画布。
+///
+/// 画布（窗口左侧的 `WIN_W` 区域）左边缘就是窗口边缘，右边才多留了通知空间：
+/// 常驻条已经顶到宽度上限时，再乘 1.075 就会胀出画布，左边的圆角／外翻被窗口边缘平切，
+/// 看上去就是「左边的过渡动画被截断」。这里锁住两头：仍有胀大反馈，但不越界。
+#[test]
+fn hover_swell_never_grows_past_the_canvas() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.browser_minimal = false;
+    h.app.settings.pet = false;
+    h.quota_accounts(20);
+    for _ in 0..40 {
+        h.cursor = None;
+        h.frame(vec![]);
+    }
+    let before = h.app.w.pos;
+    assert!(before > 560.0, "前提：常驻条应接近宽度上限，实际 {before}");
+    // 悬停但还没到展开意图时间（HOVER_INTENT = 0.2 s），只取胀大阶段。
+    h.cursor = Some(Pos2::new(crate::app::WIN_W / 2.0, 12.0));
+    for _ in 0..10 {
+        h.frame(vec![]);
+    }
+    let limit = crate::app::WIN_W - 16.0;
+    assert!(h.app.w.pos <= limit + 0.01, "悬停胀大后岛体 {} 超出画布上限 {limit}", h.app.w.pos);
+    assert!(h.app.w.pos > before, "悬停应当仍有胀大反馈：{} -> {}", before, h.app.w.pos);
+}

@@ -100,6 +100,12 @@ const MINIMAL_HOVER_INTENT: f64 = 0.40;
 const LEAVE_DELAY: f64 = 0.12;
 const PAGE_EDGE_OVERLAP: f32 = 8.0;
 const SWELL: (f32, f32) = (1.075, 1.13);
+/// 悬停胀大时岛体两端要给画布留的余量。
+///
+/// 画布（`horizontal_width`）只在右侧多留了通知空间，左边缘就是窗口边缘：
+/// 岛体一旦胀出画布，左边会被窗口直接平切 —— 收起态已经顶到 `resident_limit()`
+/// 时最明显（608 × 1.075 ≈ 654 > 640），看上去就是「左边圆角被截断」。
+const SWELL_MARGIN: f32 = 16.0;
 // 展开：欠阻尼，末段约 5% 过冲后回落；高度略软于宽度，像「垂落」下来。
 const OPEN_W: (f32, f32) = (330.0, 0.70);
 const OPEN_H: (f32, f32) = (290.0, 0.74);
@@ -3118,6 +3124,14 @@ impl App {
         if icons==0.0 {0.0}else{32.0+unread_step(horizontal)*(icons-1.0)}
     }
 
+    /// 岛体横向能画到多宽：画布宽度减去两端余量。
+    ///
+    /// 画布左侧没有额外空间（窗口左边缘就是画布左边缘），岛体一旦胀出画布，
+    /// 左边的圆角、外翻会被窗口边缘平切；这里给悬停胀大这类临时超宽兜个上限。
+    fn swell_limit(&self)->f32 {
+        (self.horizontal_width - SWELL_MARGIN).max(1.0)
+    }
+
     pub(crate) fn resident_limit(&self)->f32 {
         let limit = if self.side() {
             crate::side_dock::SIDE_H - 24.0
@@ -3730,7 +3744,9 @@ impl App {
                 self.h.tune(SWELL_K.0, SWELL_K.1);
                 // 悬停时轻微胀大：厚度方向胀得多一点（侧边停靠时厚度是宽度）。
                 let (sw,sh)=if self.side(){(SWELL.1,SWELL.0)}else{SWELL};
-                self.w.target = bw * sw;
+                // 胀大量受画布约束：常驻条已经顶到宽度上限时，再乘 1.075 就会胀出画布，
+                // 左边的圆角／外翻被窗口边缘平切（截图里「左边被截断」就是这个）。
+                self.w.target = if self.side() {bw*sw} else {(bw*sw).min(self.swell_limit())};
                 self.h.target = bh * sh;
             }
         } else {
@@ -3768,7 +3784,9 @@ impl App {
             let full = self.expanded_height();
             // 从悬停微胀的形态起步；收起时回到微胀高度就交还给弹簧，悬停微胀照旧。
             let start = bh * SWELL.1;
-            let from = if self.open {bw * SWELL.0} else {bw};
+            // 「微胀」的起点同样要受画布约束，否则宽条展开的第一帧左边就被窗口平切。
+            let swelled = (bw * SWELL.0).min(self.swell_limit());
+            let from = if self.open {swelled} else {bw};
             if self.open || self.h.pos > start + 0.5 {
                 let k = ((self.h.pos - start) / (full - start).max(1.0)).clamp(0.0, 1.0);
                 let ease = 1.0 - (1.0 - k) * (1.0 - k);
